@@ -1,0 +1,16 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+/build/
+*/build/
+app/.cxx/
+.externalNativeBuild/
+.image-runtime-build/
+models/
+*.gguf
+*.safetensors
+*.ckpt
+*.pth
+*.part

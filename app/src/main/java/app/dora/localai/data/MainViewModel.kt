@@ -1,6 +1,7 @@
 package app.dora.localai.data
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.dora.localai.domain.ChatMessage
@@ -12,6 +13,9 @@ import app.dora.localai.domain.LocalModel
 import app.dora.localai.domain.MessageRole
 import app.dora.localai.engine.DoraDemoImageEngine
 import app.dora.localai.engine.DoraDemoTextEngine
+import app.dora.localai.engine.NativeLlamaEngine
+import app.dora.localai.engine.NativeLlamaTextEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
@@ -19,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val starterTextModel = LocalModel(
     id = "dora-starter-gguf",
@@ -62,11 +67,15 @@ data class DoraUiState(
     val isGenerating: Boolean = false,
     val toastMessage: String? = null,
     val runtimeNotice: String = "Demo adapter active — native llama.cpp bridge is next",
+    val deviceSummary: String = "Device profile pending",
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val registry = LocalRegistry(application)
+    private val modelStore = LocalModelStore(application)
+    private val deviceProfile = DeviceProfile(application)
     private val textEngine = DoraDemoTextEngine()
+    private val nativeTextEngine = NativeLlamaTextEngine()
     private val imageEngine = DoraDemoImageEngine()
     private var generationJob: Job? = null
 
@@ -77,9 +86,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val installed = registry.installedModelIds()
         return DoraUiState(
             models = listOf(starterTextModel, imageModel).map { model ->
-                if (model.id in installed) model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = model.kind == app.dora.localai.domain.ModelKind.TEXT) else model
+                val artifact = registry.artifact(model.id)
+                if (model.id in installed) model.copy(
+                    name = artifact?.name ?: model.name,
+                    installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
+                    verified = model.kind == app.dora.localai.domain.ModelKind.TEXT,
+                    filePath = artifact?.path,
+                    sizeLabel = artifact?.sizeBytes?.let { formatBytes(it) } ?: model.sizeLabel,
+                ) else model
             },
             isOfflineOnly = registry.isOfflineOnly(),
+            runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
+            deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
         )
     }
 
@@ -107,6 +125,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearToast() = _uiState.update { it.copy(toastMessage = null) }
 
+    fun importGguf(uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { modelStore.importGguf(uri) }
+            result.onSuccess { artifact ->
+                registry.setArtifact(LocalRegistry.StoredArtifact(starterTextModel.id, artifact.name, artifact.path, artifact.sizeBytes, artifact.sha256))
+                _uiState.update { state ->
+                    state.copy(models = state.models.map { model ->
+                        if (model.id == starterTextModel.id) model.copy(
+                            name = artifact.name,
+                            installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
+                            verified = true,
+                            filePath = artifact.path,
+                            sizeLabel = formatBytes(artifact.sizeBytes),
+                        ) else model
+                    }, toastMessage = "GGUF validated: ${artifact.name}")
+                }
+            }.onFailure { error ->
+                _uiState.update { it.copy(toastMessage = error.message ?: "GGUF import failed") }
+            }
+        }
+    }
+
     fun installModel(modelId: String) {
         registry.setModelInstalled(modelId, true)
         _uiState.update { state ->
@@ -120,6 +160,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteModel(modelId: String) {
+        modelStore.delete(_uiState.value.models.firstOrNull { it.id == modelId }?.filePath)
         registry.setModelInstalled(modelId, false)
         _uiState.update { state ->
             state.copy(models = state.models.map { model ->
@@ -141,18 +182,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         generationJob?.cancel()
         generationJob = viewModelScope.launch {
-            val conversation = _uiState.value.conversations.first { it.id == conversationId }
-            var accumulated = ""
-            textEngine.streamReply(starterTextModel, conversation.messages).collect { token ->
-                accumulated += token
-                updateLastAssistant(conversationId, accumulated, true)
+            try {
+                val conversation = _uiState.value.conversations.first { it.id == conversationId }
+                val activeModel = _uiState.value.models.firstOrNull { it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null }
+                val engine = if (activeModel != null && nativeTextEngine.isProductionReady) nativeTextEngine else textEngine
+                var accumulated = ""
+                engine.streamReply(activeModel ?: starterTextModel, conversation.messages).collect { token ->
+                    accumulated += token
+                    updateLastAssistant(conversationId, accumulated, true)
+                }
+                updateLastAssistant(conversationId, accumulated, false)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                updateLastAssistant(conversationId, "Dora could not complete this local generation: ${error.message ?: "native runtime error"}", false)
+                _uiState.update { it.copy(toastMessage = "Local generation failed") }
+            } finally {
+                _uiState.update { it.copy(isGenerating = false) }
             }
-            updateLastAssistant(conversationId, accumulated, false)
-            _uiState.update { it.copy(isGenerating = false) }
         }
     }
 
     fun stopGeneration() {
+        NativeLlamaEngine.cancel()
         generationJob?.cancel()
         generationJob = null
         _uiState.update { it.copy(isGenerating = false, toastMessage = "Generation stopped") }
@@ -193,6 +245,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (conversation.id == id) transform(conversation) else conversation
             })
         }
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1024 * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+        bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+        else -> "%.1f KB".format(bytes / 1024.0)
     }
 
     private fun updateLastAssistant(id: String, text: String, partial: Boolean) {

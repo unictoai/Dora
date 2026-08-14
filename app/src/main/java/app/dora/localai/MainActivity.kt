@@ -2,11 +2,14 @@ package app.dora.localai
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.CheckCircle
@@ -140,7 +144,7 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
 }
 
 @Composable
-private fun PageColumn(content: @Composable () -> Unit) {
+private fun PageColumn(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -255,7 +259,7 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel) {
                 maxLines = 4,
             )
             IconButton(onClick = { if (state.isGenerating) vm.stopGeneration() else vm.sendMessage() }, modifier = Modifier.size(52.dp)) {
-                Icon(if (state.isGenerating) Icons.Default.StopCircle else Icons.Default.Send, contentDescription = if (state.isGenerating) "Stop" else "Send", tint = MaterialTheme.colorScheme.primary)
+                Icon(if (state.isGenerating) Icons.Default.StopCircle else Icons.AutoMirrored.Filled.Send, contentDescription = if (state.isGenerating) "Stop" else "Send", tint = MaterialTheme.colorScheme.primary)
             }
         }
     }
@@ -328,9 +332,12 @@ private fun ImageStudioScreen(state: DoraUiState, vm: MainViewModel) {
 
 @Composable
 private fun ModelsScreen(state: DoraUiState, vm: MainViewModel) {
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::importGguf)
+    }
     PageColumn {
         ScreenHeader("Models", "Install only what Dora can explain and validate.")
-        OutlinedButton(onClick = { vm.installModel("dora-starter-gguf") }, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) }, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Download, null)
             Spacer(Modifier.width(8.dp))
             Text("Import a local model")
@@ -404,7 +411,7 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
             }
         }
         SettingRow(Icons.Default.Storage, "Local storage", "Models, chats, images, and job metadata remain on this device.")
-        SettingRow(Icons.Default.Memory, "Device fit", "Dora will measure RAM, ABI, runtime, and thermal behavior before making support promises.")
+        SettingRow(Icons.Default.Memory, "Device fit", state.deviceSummary)
         SettingRow(Icons.Default.NetworkCheck, "Network policy", "Only explicit model acquisition may use the network in the planned production build.")
         Text("Runtime status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(state.runtimeNotice, color = MaterialTheme.colorScheme.onSurfaceVariant)

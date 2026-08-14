@@ -3,7 +3,7 @@ package app.dora.localai.domain
 import java.util.UUID
 
 enum class ModelKind { TEXT, IMAGE }
-en
+
 enum class ModelInstallState { AVAILABLE, INSTALLED, EXTERNAL, INVALID }
 
 data class LocalModel(
@@ -19,6 +19,7 @@ data class LocalModel(
     val installState: ModelInstallState,
     val verified: Boolean,
     val recommended: Boolean,
+    val filePath: String? = null,
 )
 
 enum class MessageRole { USER, ASSISTANT, SYSTEM }

@@ -12,22 +12,24 @@ This first repository build provides a native Kotlin/Jetpack Compose application
 - Image Studio screen with prompt entry, safe-preset UI, job progress surface, and a clear image-runtime-not-bundled state.
 - Settings and Privacy screen describing local storage, offline inference, model acquisition, and deletion policy.
 - Replaceable `TextInferenceEngine` and `ImageInferenceEngine` interfaces in `engine/`.
-- A deterministic offline demo text engine so the UI can be exercised without a cloud service or bundled model weights.
+- A deterministic offline demo text engine for development fallback.
+- A real ARM64 Android `dora_native` library built from pinned llama.cpp sources, with GGUF validation and native generation APIs.
+- App-private GGUF import with atomic finalization, GGUF magic validation, SHA-256 verification, and persistent artifact metadata.
 
-The demo engine is intentionally **not presented as a production AI model**. The production text path will replace it with a pinned llama.cpp/GGUF JNI adapter after real Android-device feasibility testing. The image path remains a seam until one local diffusion backend is validated on representative devices.
+The demo engine is intentionally **not presented as a production AI model**. When a validated GGUF file is imported, Dora selects the real llama.cpp JNI path; without one, the demo adapter remains visible as a fallback. The image path remains isolated until a compatible local diffusion backend is validated on representative devices.
 
 ## Build requirements
 
-The project uses Android Gradle Plugin 8.7.3, Kotlin 2.0.21, Jetpack Compose, Material 3, and Android API 35. The current module targets ARM64-first local inference architecture but does not yet bundle native inference binaries or model weights.
+The project uses Android Gradle Plugin 8.7.3, Kotlin 2.0.21, Jetpack Compose, Material 3, Android API 35, NDK 27.2.12479018, and a pinned Gradle 8.9 wrapper. The app builds ARM64-first native inference binaries and never bundles model weights.
 
 Open the repository in Android Studio, allow Gradle to resolve dependencies, and run the `app` configuration on an Android device or emulator. The first build requires the Android SDK platform and build tools for API 35.
 
 ## Runtime roadmap
 
-1. Add the disposable native feasibility harness and benchmark llama.cpp/GGUF against MLC on low-, mid-, and flagship-tier Android devices.
-2. Replace `DoraDemoTextEngine` with the selected production adapter behind the existing `TextInferenceEngine` interface. `LlamaCppTextEngine` is included as an explicit fail-loudly seam until the native bridge is validated.
-3. Expand the current SharedPreferences-backed local registry into persistent model metadata, file checksums, managed imports, external references, and download jobs.
-4. Validate one image backend and model family, then replace `DoraDemoImageEngine` behind `ImageInferenceEngine`.
+1. Run the native llama.cpp path on representative physical Android devices with a real GGUF file, then lock the support matrix.
+2. Expand the current validated import path with curated HTTPS manifests, resumable downloads, device-fit checks, and external-file references.
+3. Persist conversations and jobs through Room and add lifecycle recovery, cancellation, and foreground-work policy.
+4. Isolate stable-diffusion.cpp or select a compatible image backend, then validate one real model family on ARM64 Android.
 5. Add instrumentation tests for lifecycle recovery, cancellation, corrupted models, low storage, and airplane-mode inference.
 
 ## Privacy position
