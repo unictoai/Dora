@@ -1,6 +1,7 @@
 package app.dora.localai.data
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.dora.localai.domain.ChatMessage
 import app.dora.localai.domain.Conversation
@@ -63,13 +64,24 @@ data class DoraUiState(
     val runtimeNotice: String = "Demo adapter active — native llama.cpp bridge is next",
 )
 
-class MainViewModel : ViewModel() {
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val registry = LocalRegistry(application)
     private val textEngine = DoraDemoTextEngine()
     private val imageEngine = DoraDemoImageEngine()
     private var generationJob: Job? = null
 
-    private val _uiState = MutableStateFlow(DoraUiState())
+    private val _uiState = MutableStateFlow(initialState())
     val uiState: StateFlow<DoraUiState> = _uiState.asStateFlow()
+
+    private fun initialState(): DoraUiState {
+        val installed = registry.installedModelIds()
+        return DoraUiState(
+            models = listOf(starterTextModel, imageModel).map { model ->
+                if (model.id in installed) model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = model.kind == app.dora.localai.domain.ModelKind.TEXT) else model
+            },
+            isOfflineOnly = registry.isOfflineOnly(),
+        )
+    }
 
     init {
         val conversation = _uiState.value.conversations.first()
@@ -82,11 +94,21 @@ class MainViewModel : ViewModel() {
 
     fun setImagePrompt(value: String) = _uiState.update { it.copy(imagePrompt = value) }
 
-    fun toggleOfflineOnly() = _uiState.update { it.copy(isOfflineOnly = !it.isOfflineOnly) }
+    fun toggleOfflineOnly() {
+        val value = !_uiState.value.isOfflineOnly
+        registry.setOfflineOnly(value)
+        _uiState.update { it.copy(isOfflineOnly = value) }
+    }
+
+    fun clearAllLocalData() {
+        registry.clearAll()
+        _uiState.update { DoraUiState(activeConversationId = it.conversations.firstOrNull()?.id.orEmpty(), toastMessage = "Local registry cleared") }
+    }
 
     fun clearToast() = _uiState.update { it.copy(toastMessage = null) }
 
     fun installModel(modelId: String) {
+        registry.setModelInstalled(modelId, true)
         _uiState.update { state ->
             state.copy(models = state.models.map { model ->
                 if (model.id == modelId) model.copy(
@@ -98,6 +120,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun deleteModel(modelId: String) {
+        registry.setModelInstalled(modelId, false)
         _uiState.update { state ->
             state.copy(models = state.models.map { model ->
                 if (model.id == modelId) model.copy(installState = app.dora.localai.domain.ModelInstallState.AVAILABLE) else model

@@ -408,7 +408,7 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
         SettingRow(Icons.Default.NetworkCheck, "Network policy", "Only explicit model acquisition may use the network in the planned production build.")
         Text("Runtime status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(state.runtimeNotice, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        TextButton(onClick = {}, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
+        TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
     }
 }
 

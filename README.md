@@ -25,8 +25,8 @@ Open the repository in Android Studio, allow Gradle to resolve dependencies, and
 ## Runtime roadmap
 
 1. Add the disposable native feasibility harness and benchmark llama.cpp/GGUF against MLC on low-, mid-, and flagship-tier Android devices.
-2. Replace `DoraDemoTextEngine` with the selected production adapter behind the existing `TextInferenceEngine` interface.
-3. Add persistent Room/DataStore-backed model metadata, file checksums, managed imports, external references, and download jobs.
+2. Replace `DoraDemoTextEngine` with the selected production adapter behind the existing `TextInferenceEngine` interface. `LlamaCppTextEngine` is included as an explicit fail-loudly seam until the native bridge is validated.
+3. Expand the current SharedPreferences-backed local registry into persistent model metadata, file checksums, managed imports, external references, and download jobs.
 4. Validate one image backend and model family, then replace `DoraDemoImageEngine` behind `ImageInferenceEngine`.
 5. Add instrumentation tests for lifecycle recovery, cancellation, corrupted models, low storage, and airplane-mode inference.
 
