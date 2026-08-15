@@ -74,6 +74,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.dora.localai.data.DoraUiState
 import app.dora.localai.data.MainViewModel
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.DoraJob
+import app.dora.localai.domain.JobKind
+import app.dora.localai.domain.JobState
 import app.dora.localai.domain.DeviceFitLevel
 import app.dora.localai.domain.HuggingFaceCandidate
 import app.dora.localai.domain.HuggingFaceFileCandidate
@@ -291,6 +294,7 @@ private fun MessageBubble(message: ChatMessage) {
 @Composable
 private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit) {
     val models = state.models.filter { it.kind == ModelKind.TEXT }
+    val downloadJob = state.jobs.lastOrNull { it.kind == JobKind.DOWNLOAD && it.state == JobState.RUNNING }
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
         ScreenHeader("Models", "Import files or find a public GGUF on Hugging Face.")
         Spacer(Modifier.height(14.dp))
@@ -319,6 +323,7 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 18.dp, bottom = 24.dp),
         ) {
+            downloadJob?.let { job -> item { DownloadStatusCard(job) } }
             item { Text("On this device", style = MaterialTheme.typography.titleMedium) }
             items(models, key = { it.id }) { model -> ModelCard(model, vm) }
             if (state.huggingFaceCandidates.isNotEmpty()) {
@@ -329,6 +334,17 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
                     Text("Search Hugging Face for public GGUF files. Dora ranks quantizations by your measured RAM, storage, and ARM64 support.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DownloadStatusCard(job: DoraJob) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Downloading ${job.label}", style = MaterialTheme.typography.titleSmall)
+            Text(job.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            LinearProgressIndicator(progress = { job.progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
         }
     }
 }
@@ -427,7 +443,7 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
         Spacer(Modifier.height(12.dp))
-        Text("Dora 0.3.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Text("Dora 0.3.1 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
 }
 

@@ -2,8 +2,16 @@ package app.dora.localai.data
 
 import android.app.Application
 import android.net.Uri
+import androidx.work.Constraints
+import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.dora.localai.DoraApplication
 import app.dora.localai.domain.ChatMessage
 import app.dora.localai.domain.DeviceFitLevel
 import app.dora.localai.domain.HuggingFaceCandidate
@@ -27,6 +35,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
 
 private val starterTextModel = LocalModel(
     id = "dora-starter-gguf",
@@ -79,10 +88,11 @@ data class DoraUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val registry = LocalRegistry(application)
+    private val dao = (application as DoraApplication).database.dao()
     private val modelStore = LocalModelStore(application)
     private val deviceProfile = DeviceProfile(application)
     private val huggingFaceClient = HuggingFaceClient(deviceProfile)
-    private val modelDownloadManager = ModelDownloadManager(application)
+    private val workManager = WorkManager.getInstance(application)
     private val textEngine = DoraDemoTextEngine()
     private val nativeTextEngine = NativeLlamaTextEngine()
     private val imageEngine = DoraDemoImageEngine()
@@ -134,7 +144,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         val conversation = _uiState.value.conversations.first()
         _uiState.update { it.copy(activeConversationId = conversation.id) }
+        viewModelScope.launch {
+            dao.observeJobs().collect { records ->
+                _uiState.update { state -> state.copy(jobs = records.map(::toDoraJob)) }
+            }
+        }
     }
+
+    private fun toDoraJob(record: JobRecord): DoraJob = DoraJob(
+        id = record.id,
+        kind = runCatching { JobKind.valueOf(record.kind) }.getOrDefault(JobKind.DOWNLOAD),
+        label = record.label,
+        state = runCatching { JobState.valueOf(record.state) }.getOrDefault(JobState.FAILED),
+        progress = record.progress,
+        message = record.message,
+    )
 
     fun selectTab(tab: Int) = _uiState.update { it.copy(selectedTab = tab, toastMessage = null) }
 
@@ -183,33 +207,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             verified = false,
             recommended = file.deviceFit.level == DeviceFitLevel.RECOMMENDED,
         )
-        val job = DoraJob(kind = JobKind.DOWNLOAD, label = file.filename, state = JobState.RUNNING, message = "Starting secure download")
+        val job = DoraJob(kind = JobKind.DOWNLOAD, label = file.filename, state = JobState.RUNNING, message = "Queued for secure download")
         _uiState.update { it.copy(jobs = it.jobs + job, activeDownloadId = modelId, toastMessage = null) }
-        viewModelScope.launch {
-            val result = modelDownloadManager.download(
-                ModelDownloadManager.DownloadManifest(model, file.downloadUrl, file.sha256, file.sizeBytes),
-            ) { bytes, total ->
-                val progress = if (total != null && total > 0) (bytes.toFloat() / total).coerceIn(0f, 1f) else 0f
-                updateDownloadJob(job.id, progress, "Downloading ${formatBytes(bytes)}")
-            }
-            val fileResult = result.getOrNull()
-            val nativeValid = fileResult?.let { withContext(Dispatchers.Default) { NativeLlamaEngine.validateModel(it.absolutePath) } } == true
-            if (!nativeValid) fileResult?.delete()
-            val finalResult = if (nativeValid) result else Result.failure(IllegalStateException("Dora could not load this GGUF on this ARM64 device"))
-            finalResult.fold(
-                onSuccess = { downloaded ->
-                    registry.setArtifact(LocalRegistry.StoredArtifact(modelId, file.filename, downloaded.absolutePath, downloaded.length(), file.sha256.orEmpty(), file.repoId, file.filename, file.revision, file.downloadUrl, file.license))
-                    _uiState.update { state ->
-                        val installed = model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = true, filePath = downloaded.absolutePath)
-                        state.copy(models = (state.models.filterNot { it.id == modelId } + installed), activeDownloadId = null, toastMessage = "Model ready: ${file.filename}")
-                    }
-                    updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE)
-                },
-                onFailure = { error ->
-                    updateDownloadJob(job.id, 0f, error.message ?: "Model download failed", JobState.FAILED)
-                    _uiState.update { it.copy(activeDownloadId = null, toastMessage = error.message ?: "Model download failed") }
-                },
+        val request = OneTimeWorkRequestBuilder<DoraModelDownloadWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 15L, TimeUnit.SECONDS)
+            .setInputData(
+                Data.Builder()
+                    .putString(DoraModelDownloadWorker.KEY_JOB_ID, job.id)
+                    .putString(DoraModelDownloadWorker.KEY_MODEL_ID, modelId)
+                    .putString(DoraModelDownloadWorker.KEY_MODEL_NAME, file.filename)
+                    .putString(DoraModelDownloadWorker.KEY_URL, file.downloadUrl)
+                    .putString(DoraModelDownloadWorker.KEY_SHA256, file.sha256.orEmpty())
+                    .putLong(DoraModelDownloadWorker.KEY_BYTES, file.sizeBytes)
+                    .putString(DoraModelDownloadWorker.KEY_SOURCE_REPO, file.repoId)
+                    .putString(DoraModelDownloadWorker.KEY_SOURCE_FILENAME, file.filename)
+                    .putString(DoraModelDownloadWorker.KEY_SOURCE_REVISION, file.revision)
+                    .putString(DoraModelDownloadWorker.KEY_SOURCE_LICENSE, file.license)
+                    .build(),
             )
+            .build()
+        workManager.enqueueUniqueWork("download-$modelId", ExistingWorkPolicy.REPLACE, request)
+        viewModelScope.launch {
+            workManager.getWorkInfoByIdFlow(request.id).collect { info ->
+                info ?: return@collect
+                val progress = info.progress.getFloat(DoraModelDownloadWorker.KEY_PROGRESS, 0f)
+                val message = info.progress.getLong(DoraModelDownloadWorker.KEY_BYTES_DOWNLOADED, 0L).takeIf { it > 0L }?.let { "Downloading ${formatBytes(it)}" } ?: "Queued for secure download"
+                when {
+                    info.state == WorkInfo.State.ENQUEUED -> updateDownloadJob(job.id, progress, "Queued or waiting for network")
+                    info.state == WorkInfo.State.RUNNING -> updateDownloadJob(job.id, progress, message)
+                    info.state == WorkInfo.State.SUCCEEDED -> {
+                        val artifact = registry.artifact(modelId)
+                        val installed = artifact?.let { model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = true, filePath = it.path) }
+                        if (installed != null) {
+                            _uiState.update { state -> state.copy(models = state.models.filterNot { it.id == modelId } + installed, activeDownloadId = null, toastMessage = "Model ready: ${file.filename}") }
+                            updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE)
+                        } else {
+                            _uiState.update { it.copy(activeDownloadId = null, toastMessage = "Download completed but Dora could not restore the model record") }
+                            updateDownloadJob(job.id, 0f, "Model record missing after download", JobState.FAILED)
+                        }
+                    }
+                    info.state.isFinished -> {
+                        val error = info.outputData.getString(DoraModelDownloadWorker.KEY_ERROR) ?: "Model download failed"
+                        updateDownloadJob(job.id, progress, error, JobState.FAILED)
+                        _uiState.update { it.copy(activeDownloadId = null, toastMessage = error) }
+                    }
+                }
+            }
         }
     }
 

@@ -8,6 +8,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.Locale
 import kotlin.coroutines.coroutineContext
 
 class ModelDownloadManager(context: Context) {
@@ -23,21 +24,26 @@ class ModelDownloadManager(context: Context) {
     suspend fun download(
         manifest: DownloadManifest,
         onProgress: suspend (bytes: Long, total: Long?) -> Unit,
-    ): Result<File> = runCatching {
-        require(manifest.url.startsWith("https://")) { "Dora only accepts HTTPS model sources." }
-        val finalFile = File(modelDirectory, "${manifest.model.id}.gguf")
-        val partialFile = File(modelDirectory, "${manifest.model.id}.part")
-        val existingBytes = if (partialFile.exists()) partialFile.length() else 0L
-
-        val connection = (URL(manifest.url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 20_000
-            readTimeout = 60_000
-            setRequestProperty("Accept", "application/octet-stream")
-            if (existingBytes > 0) setRequestProperty("Range", "bytes=$existingBytes-")
+    ): Result<File> {
+        return try {
+            Result.success(downloadInternal(manifest, onProgress))
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Result.failure(error)
         }
+    }
 
-        connection.connect()
+    private suspend fun downloadInternal(
+        manifest: DownloadManifest,
+        onProgress: suspend (bytes: Long, total: Long?) -> Unit,
+    ): File {
+        require(manifest.url.startsWith("https://")) { "Dora only accepts HTTPS model sources." }
+        val safeId = manifest.model.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val finalFile = File(modelDirectory, "$safeId.gguf")
+        val partialFile = File(modelDirectory, "$safeId.part")
+        val existingBytes = if (partialFile.exists()) partialFile.length() else 0L
+        val connection = openDownloadConnection(manifest.url, existingBytes)
         try {
             val response = connection.responseCode
             val append = existingBytes > 0 && response == HttpURLConnection.HTTP_PARTIAL
@@ -45,9 +51,14 @@ class ModelDownloadManager(context: Context) {
             if (!append && existingBytes > 0) partialFile.delete()
 
             val startingBytes = if (append) existingBytes else 0L
-            val total = connection.getHeaderFieldLong("Content-Length", -1L).let { length ->
-                if (length <= 0) manifest.expectedBytes else length + startingBytes
-            }
+            val total = parseContentRangeTotal(connection.getHeaderField("Content-Range"))
+                ?: connection.getHeaderFieldLong("Content-Length", -1L).let { length ->
+                    when {
+                        length <= 0L -> manifest.expectedBytes
+                        append -> length + startingBytes
+                        else -> length
+                    }
+                }
             connection.inputStream.use { input ->
                 FileOutputStream(partialFile, append).buffered(DEFAULT_BUFFER).use { output ->
                     copyWithProgress(input, output, startingBytes, total, onProgress)
@@ -58,14 +69,47 @@ class ModelDownloadManager(context: Context) {
         }
 
         require(partialFile.exists() && partialFile.length() > 0L) { "Downloaded model is empty." }
-        manifest.expectedBytes?.let { require(partialFile.length() == it) { "Downloaded model size does not match the manifest." } }
+        manifest.expectedBytes?.let { expected ->
+            require(partialFile.length() == expected) {
+                "Downloaded model size does not match Hugging Face metadata (${partialFile.length()} of $expected bytes)."
+            }
+        }
         val actualHash = sha256(partialFile)
         manifest.expectedSha256?.takeIf { it.isNotBlank() }?.let { expected ->
             require(actualHash.equals(expected, ignoreCase = true)) { "Model checksum mismatch." }
         }
+        require(hasGgufMagic(partialFile)) { "The downloaded file is not a valid GGUF artifact." }
         if (finalFile.exists()) finalFile.delete()
         check(partialFile.renameTo(finalFile)) { "Could not finalize the downloaded model." }
-        finalFile
+        return finalFile
+    }
+
+    private fun openDownloadConnection(sourceUrl: String, rangeStart: Long): HttpURLConnection {
+        var currentUrl = sourceUrl
+        repeat(MAX_REDIRECTS + 1) { redirectCount ->
+            val connection = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                instanceFollowRedirects = false
+                requestMethod = "GET"
+                connectTimeout = 20_000
+                readTimeout = 60_000
+                setRequestProperty("Accept", "application/octet-stream")
+                setRequestProperty("Accept-Encoding", "identity")
+                setRequestProperty("User-Agent", "Dora-Android/0.3")
+                if (rangeStart > 0L) setRequestProperty("Range", "bytes=$rangeStart-")
+            }
+            connection.connect()
+            val response = connection.responseCode
+            if (response !in REDIRECT_MIN..REDIRECT_MAX) return connection
+            val location = connection.getHeaderField("Location") ?: run {
+                connection.disconnect()
+                error("Hugging Face returned a redirect without a destination.")
+            }
+            connection.disconnect()
+            require(redirectCount < MAX_REDIRECTS) { "Too many redirects while opening the Hugging Face file." }
+            currentUrl = URL(URL(currentUrl), location).toString()
+            require(currentUrl.startsWith("https://")) { "Dora rejected a non-HTTPS model redirect." }
+        }
+        error("Could not open the Hugging Face model URL.")
     }
 
     private suspend fun copyWithProgress(
@@ -77,7 +121,7 @@ class ModelDownloadManager(context: Context) {
     ) {
         val buffer = ByteArray(DEFAULT_BUFFER)
         var copied = initial
-        var lastReport = 0L
+        var lastReport = initial
         while (true) {
             coroutineContext.ensureActive()
             val count = input.read(buffer)
@@ -93,6 +137,16 @@ class ModelDownloadManager(context: Context) {
         onProgress(copied, total)
     }
 
+    private fun parseContentRangeTotal(header: String?): Long? = header
+        ?.substringAfter('/')
+        ?.toLongOrNull()
+        ?.takeIf { it > 0L }
+
+    private fun hasGgufMagic(file: File): Boolean = file.inputStream().use { input ->
+        val magic = ByteArray(4)
+        input.read(magic) == 4 && magic.contentEquals(byteArrayOf(0x47, 0x47, 0x55, 0x46))
+    }
+
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().buffered(DEFAULT_BUFFER).use { input ->
@@ -103,11 +157,14 @@ class ModelDownloadManager(context: Context) {
                 digest.update(buffer, 0, count)
             }
         }
-        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        return digest.digest().joinToString("") { byte -> "%02x".format(Locale.US, byte) }
     }
 
     private companion object {
         const val DEFAULT_BUFFER = 1024 * 1024
         const val REPORT_INTERVAL = 1024 * 1024 * 4L
+        const val MAX_REDIRECTS = 5
+        const val REDIRECT_MIN = 300
+        const val REDIRECT_MAX = 399
     }
 }
