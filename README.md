@@ -14,6 +14,10 @@ This first repository build provides a native Kotlin/Jetpack Compose application
 - A deterministic offline demo text engine for development fallback.
 - A real ARM64 Android `dora_native` library built from pinned llama.cpp sources, with GGUF validation and native generation APIs.
 - App-private GGUF import with atomic finalization, GGUF magic validation, SHA-256 verification, and persistent artifact metadata.
+- Public Hugging Face GGUF discovery using repository metadata, exact revisions, file sizes, quantization labels, license visibility, and model-card provenance.
+- Resumable HTTPS downloads from Hugging Face with checksum validation, native post-download validation, durable artifact restoration, and explicit gated-repository handling.
+- Conservative device-fit recommendations based on measured ARM64 ABI, available storage, and RAM headroom rather than popularity alone.
+- A generated Dora logo asset used by the launcher and first-run onboarding, with usage guidance in `BRAND.md`.
 
 The first-run experience does not pretend a placeholder model is installed. Dora opens with GGUF onboarding, validates the selected file, and only then opens chat. When a validated GGUF file is imported, Dora selects the real llama.cpp JNI path. Image generation is intentionally not exposed as a primary destination until a real image backend is shipped.
 
@@ -30,7 +34,7 @@ Dora is intentionally chat-first. The product surface uses a quiet off-white can
 ## Runtime roadmap
 
 1. Run the native llama.cpp path on representative physical Android devices with a real GGUF file, then lock the support matrix.
-2. Expand the current validated import path with curated HTTPS manifests, resumable downloads, device-fit checks, and external-file references.
+2. Expand the current Hugging Face catalog with curated public-model presets, gated-model browser handoff, repository license acknowledgements, and better background-download recovery.
 3. Persist conversations and jobs through Room and add lifecycle recovery, cancellation, and foreground-work policy.
 4. Isolate stable-diffusion.cpp or select a compatible image backend, then validate one real model family on ARM64 Android.
 5. Add instrumentation tests for lifecycle recovery, cancellation, corrupted models, low storage, and airplane-mode inference.
@@ -45,3 +49,5 @@ Dora’s planned production inference path has no required account, no cloud fal
 - `dora_requirements.md` — product requirements, support matrix, user journeys, and acceptance criteria.
 - `dora_feasibility_spec.md` — runtime comparison and real-device benchmark protocol.
 - `dora_plan.md` — approved product and engineering plan.
+- `HUGGINGFACE_INTEGRATION_RESEARCH.md` — verified Hub API, GGUF, download, and gating decisions.
+- `BRAND.md` — Dora logo usage, palette, and asset guidance.

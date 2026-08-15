@@ -22,6 +22,11 @@ data class ModelRecord(
     val license: String,
     val verified: Boolean,
     val updatedAt: Long,
+    val sourceRepo: String? = null,
+    val sourceFilename: String? = null,
+    val sourceRevision: String? = null,
+    val sourceUrl: String? = null,
+    val sourceLicense: String? = null,
 )
 
 @Entity(tableName = "job_records")
@@ -59,15 +64,28 @@ interface DoraDao {
     suspend fun deleteJob(id: String)
 }
 
-@Database(entities = [ModelRecord::class, JobRecord::class], version = 1, exportSchema = false)
+@Database(entities = [ModelRecord::class, JobRecord::class], version = 2, exportSchema = false)
 abstract class DoraDatabase : RoomDatabase() {
     abstract fun dao(): DoraDao
 
     companion object {
         @Volatile private var instance: DoraDatabase? = null
 
+        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE model_records ADD COLUMN sourceRepo TEXT")
+                db.execSQL("ALTER TABLE model_records ADD COLUMN sourceFilename TEXT")
+                db.execSQL("ALTER TABLE model_records ADD COLUMN sourceRevision TEXT")
+                db.execSQL("ALTER TABLE model_records ADD COLUMN sourceUrl TEXT")
+                db.execSQL("ALTER TABLE model_records ADD COLUMN sourceLicense TEXT")
+            }
+        }
+
         fun get(context: Context): DoraDatabase = instance ?: synchronized(this) {
-            instance ?: Room.databaseBuilder(context, DoraDatabase::class.java, "dora.db").build().also { instance = it }
+            instance ?: Room.databaseBuilder(context, DoraDatabase::class.java, "dora.db")
+                .addMigrations(MIGRATION_1_2)
+                .build()
+                .also { instance = it }
         }
     }
 }

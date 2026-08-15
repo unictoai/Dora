@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -73,6 +74,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.dora.localai.data.DoraUiState
 import app.dora.localai.data.MainViewModel
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.DeviceFitLevel
+import app.dora.localai.domain.HuggingFaceCandidate
+import app.dora.localai.domain.HuggingFaceFileCandidate
 import app.dora.localai.domain.LocalModel
 import app.dora.localai.domain.MessageRole
 import app.dora.localai.domain.ModelInstallState
@@ -114,9 +118,12 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
         }
     }
 
-    if (!hasModel) {
+    if (!hasModel && state.selectedTab != 1) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            ModelSetupScreen(onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) })
+            ModelSetupScreen(
+                onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
+                onBrowse = { vm.selectTab(1) },
+            )
         }
         SnackbarHost(hostState = snackbarHostState)
         return
@@ -150,22 +157,17 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
 }
 
 @Composable
-private fun ModelSetupScreen(onImport: () -> Unit) {
+private fun ModelSetupScreen(onImport: () -> Unit, onBrowse: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Surface(
-            modifier = Modifier.size(72.dp),
-            shape = RoundedCornerShape(22.dp),
-            color = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text("D", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-            }
-        }
+        androidx.compose.foundation.Image(
+            painter = androidx.compose.ui.res.painterResource(app.dora.localai.R.drawable.dora_logo),
+            contentDescription = "Dora logo",
+            modifier = Modifier.size(86.dp).clip(RoundedCornerShape(26.dp)),
+        )
         Spacer(Modifier.height(28.dp))
         Text("Set up Dora", style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
         Spacer(Modifier.height(10.dp))
@@ -184,6 +186,12 @@ private fun ModelSetupScreen(onImport: () -> Unit) {
             Icon(Icons.Default.Download, contentDescription = null)
             Spacer(Modifier.width(10.dp))
             Text("Import a GGUF model")
+        }
+        Spacer(Modifier.height(10.dp))
+        OutlinedButton(onClick = onBrowse, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(16.dp)) {
+            Icon(Icons.Default.Memory, contentDescription = null)
+            Spacer(Modifier.width(10.dp))
+            Text("Find a model on Hugging Face")
         }
         Spacer(Modifier.height(12.dp))
         Text("GGUF files only • model weights are not bundled", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -284,18 +292,99 @@ private fun MessageBubble(message: ChatMessage) {
 private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit) {
     val models = state.models.filter { it.kind == ModelKind.TEXT }
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
-        ScreenHeader("Models", "Import and manage the files Dora runs locally.")
-        Spacer(Modifier.height(18.dp))
-        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(16.dp)) {
+        ScreenHeader("Models", "Import files or find a public GGUF on Hugging Face.")
+        Spacer(Modifier.height(14.dp))
+        OutlinedTextField(
+            value = state.huggingFaceQuery,
+            onValueChange = vm::setHuggingFaceQuery,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            shape = RoundedCornerShape(16.dp),
+            placeholder = { Text("Search public GGUF models") },
+            trailingIcon = {
+                IconButton(onClick = vm::browseHuggingFace, enabled = !state.isSearchingHuggingFace) {
+                    if (state.isSearchingHuggingFace) CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Memory, contentDescription = "Search Hugging Face")
+                }
+            },
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp)) {
             Icon(Icons.Default.Download, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text("Import another GGUF")
+            Text("Import a local GGUF")
         }
-        Spacer(Modifier.height(20.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 18.dp, bottom = 24.dp),
+        ) {
+            item { Text("On this device", style = MaterialTheme.typography.titleMedium) }
             items(models, key = { it.id }) { model -> ModelCard(model, vm) }
+            if (state.huggingFaceCandidates.isNotEmpty()) {
+                item { Text("Suggested for this device", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp)) }
+                items(state.huggingFaceCandidates, key = { it.repoId }) { candidate -> HuggingFaceCandidateCard(candidate, vm, state.activeDownloadId) }
+            } else {
+                item {
+                    Text("Search Hugging Face for public GGUF files. Dora ranks quantizations by your measured RAM, storage, and ARM64 support.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun HuggingFaceCandidateCard(candidate: HuggingFaceCandidate, vm: MainViewModel, activeDownloadId: String?) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(candidate.displayName, style = MaterialTheme.typography.titleMedium)
+            Text(candidate.repoId, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(candidate.description, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (candidate.gated) {
+                Text("Gated repository — request access on Hugging Face before downloading.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            candidate.files.take(3).forEach { file ->
+                HuggingFaceFileRow(file, candidate, vm, activeDownloadId)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HuggingFaceFileRow(file: HuggingFaceFileCandidate, candidate: HuggingFaceCandidate, vm: MainViewModel, activeDownloadId: String?) {
+    Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text(file.filename, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${file.quantization} • ${formatBytesForUi(file.sizeBytes)}", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            FitLabel(file.deviceFit.level)
+        }
+        Text(file.deviceFit.explanation, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Button(
+            onClick = { vm.downloadHuggingFace(file, candidate) },
+            enabled = file.deviceFit.allowed && (activeDownloadId == null || activeDownloadId == "hf-${file.repoId}-${file.filename}".replace(Regex("[^A-Za-z0-9._-]"), "_")),
+            modifier = Modifier.fillMaxWidth().height(42.dp),
+            shape = RoundedCornerShape(12.dp),
+        ) { Text(if (activeDownloadId == "hf-${file.repoId}-${file.filename}".replace(Regex("[^A-Za-z0-9._-]"), "_")) "Downloading…" else if (file.deviceFit.allowed) "Download to Dora" else "Not recommended") }
+    }
+}
+
+@Composable
+private fun FitLabel(level: DeviceFitLevel) {
+    val (label, color) = when (level) {
+        DeviceFitLevel.RECOMMENDED -> "Recommended" to Color(0xFF18864B)
+        DeviceFitLevel.POSSIBLE -> "Possible" to Color(0xFF9A6700)
+        DeviceFitLevel.TOO_HEAVY -> "Too heavy" to MaterialTheme.colorScheme.error
+        DeviceFitLevel.UNSUPPORTED -> "Unsupported" to MaterialTheme.colorScheme.error
+    }
+    Surface(shape = RoundedCornerShape(20.dp), color = color.copy(alpha = 0.12f)) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = color, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+    }
+}
+
+private fun formatBytesForUi(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+    bytes >= 1024L * 1024L -> "%.0f MB".format(bytes / (1024.0 * 1024.0))
+    else -> "%.0f KB".format(bytes / 1024.0)
 }
 
 @Composable
@@ -338,7 +427,7 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
         Spacer(Modifier.height(12.dp))
-        Text("Dora 0.2.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Text("Dora 0.3.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
 }
 

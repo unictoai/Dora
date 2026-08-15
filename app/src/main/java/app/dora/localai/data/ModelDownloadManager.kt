@@ -16,7 +16,7 @@ class ModelDownloadManager(context: Context) {
     data class DownloadManifest(
         val model: LocalModel,
         val url: String,
-        val expectedSha256: String,
+        val expectedSha256: String? = null,
         val expectedBytes: Long? = null,
     )
 
@@ -60,7 +60,9 @@ class ModelDownloadManager(context: Context) {
         require(partialFile.exists() && partialFile.length() > 0L) { "Downloaded model is empty." }
         manifest.expectedBytes?.let { require(partialFile.length() == it) { "Downloaded model size does not match the manifest." } }
         val actualHash = sha256(partialFile)
-        require(actualHash.equals(manifest.expectedSha256, ignoreCase = true)) { "Model checksum mismatch." }
+        manifest.expectedSha256?.takeIf { it.isNotBlank() }?.let { expected ->
+            require(actualHash.equals(expected, ignoreCase = true)) { "Model checksum mismatch." }
+        }
         if (finalFile.exists()) finalFile.delete()
         check(partialFile.renameTo(finalFile)) { "Could not finalize the downloaded model." }
         finalFile

@@ -5,6 +5,9 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.DeviceFitLevel
+import app.dora.localai.domain.HuggingFaceCandidate
+import app.dora.localai.domain.HuggingFaceFileCandidate
 import app.dora.localai.domain.Conversation
 import app.dora.localai.domain.DoraJob
 import app.dora.localai.domain.JobKind
@@ -68,12 +71,18 @@ data class DoraUiState(
     val toastMessage: String? = null,
     val runtimeNotice: String = "Demo adapter active — native llama.cpp bridge is next",
     val deviceSummary: String = "Device profile pending",
+    val huggingFaceQuery: String = "",
+    val huggingFaceCandidates: List<HuggingFaceCandidate> = emptyList(),
+    val isSearchingHuggingFace: Boolean = false,
+    val activeDownloadId: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val registry = LocalRegistry(application)
     private val modelStore = LocalModelStore(application)
     private val deviceProfile = DeviceProfile(application)
+    private val huggingFaceClient = HuggingFaceClient(deviceProfile)
+    private val modelDownloadManager = ModelDownloadManager(application)
     private val textEngine = DoraDemoTextEngine()
     private val nativeTextEngine = NativeLlamaTextEngine()
     private val imageEngine = DoraDemoImageEngine()
@@ -84,17 +93,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun initialState(): DoraUiState {
         val installed = registry.installedModelIds()
+        val builtInIds = setOf(starterTextModel.id, imageModel.id)
+        val builtInModels = listOf(starterTextModel, imageModel).map { model ->
+            val artifact = registry.artifact(model.id)
+            if (model.id in installed) model.copy(
+                name = artifact?.name ?: model.name,
+                publisher = artifact?.sourceRepo ?: model.publisher,
+                license = artifact?.sourceLicense ?: model.license,
+                installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
+                verified = model.kind == app.dora.localai.domain.ModelKind.TEXT,
+                filePath = artifact?.path,
+                sizeLabel = artifact?.sizeBytes?.let { formatBytes(it) } ?: model.sizeLabel,
+            ) else model
+        }
+        val downloadedModels = registry.allArtifacts().filterNot { it.id in builtInIds }.map { artifact ->
+            LocalModel(
+                id = artifact.id,
+                name = artifact.name,
+                publisher = artifact.sourceRepo ?: "Local model",
+                kind = app.dora.localai.domain.ModelKind.TEXT,
+                format = "GGUF",
+                sizeLabel = formatBytes(artifact.sizeBytes),
+                memoryLabel = "Imported from Hugging Face",
+                license = artifact.sourceLicense ?: "License recorded in provenance",
+                description = artifact.sourceRevision?.let { "Hugging Face revision ${it.take(12)}" } ?: "Validated local model",
+                installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
+                verified = true,
+                recommended = false,
+                filePath = artifact.path,
+            )
+        }
         return DoraUiState(
-            models = listOf(starterTextModel, imageModel).map { model ->
-                val artifact = registry.artifact(model.id)
-                if (model.id in installed) model.copy(
-                    name = artifact?.name ?: model.name,
-                    installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
-                    verified = model.kind == app.dora.localai.domain.ModelKind.TEXT,
-                    filePath = artifact?.path,
-                    sizeLabel = artifact?.sizeBytes?.let { formatBytes(it) } ?: model.sizeLabel,
-                ) else model
-            },
+            models = builtInModels + downloadedModels,
             isOfflineOnly = registry.isOfflineOnly(),
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
             deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
@@ -111,6 +141,81 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setComposerText(value: String) = _uiState.update { it.copy(composerText = value) }
 
     fun setImagePrompt(value: String) = _uiState.update { it.copy(imagePrompt = value) }
+
+    fun setHuggingFaceQuery(value: String) = _uiState.update { it.copy(huggingFaceQuery = value) }
+
+    fun browseHuggingFace() {
+        val query = _uiState.value.huggingFaceQuery.trim().ifBlank { "gguf" }
+        _uiState.update { it.copy(isSearchingHuggingFace = true, toastMessage = null) }
+        viewModelScope.launch {
+            val result = huggingFaceClient.search(query)
+            _uiState.update {
+                result.fold(
+                    onSuccess = { candidates -> it.copy(huggingFaceCandidates = candidates, isSearchingHuggingFace = false, toastMessage = if (candidates.isEmpty()) "No public GGUF repositories found" else null) },
+                    onFailure = { error -> it.copy(isSearchingHuggingFace = false, toastMessage = error.message ?: "Hugging Face search failed") },
+                )
+            }
+        }
+    }
+
+    fun downloadHuggingFace(file: HuggingFaceFileCandidate, candidate: HuggingFaceCandidate) {
+        if (candidate.gated) {
+            _uiState.update { it.copy(toastMessage = "This repository is gated. Open it on Hugging Face to request access.") }
+            return
+        }
+        if (!file.deviceFit.allowed) {
+            _uiState.update { it.copy(toastMessage = file.deviceFit.explanation) }
+            return
+        }
+        if (_uiState.value.activeDownloadId != null) return
+        val modelId = "hf-${file.repoId}-${file.filename}".replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val model = LocalModel(
+            id = modelId,
+            name = file.filename,
+            publisher = file.repoId,
+            kind = app.dora.localai.domain.ModelKind.TEXT,
+            format = "${file.quantization} GGUF",
+            sizeLabel = formatBytes(file.sizeBytes),
+            memoryLabel = file.deviceFit.label,
+            license = file.license,
+            description = "Downloaded from Hugging Face at revision ${file.revision.take(12)}.",
+            installState = app.dora.localai.domain.ModelInstallState.AVAILABLE,
+            verified = false,
+            recommended = file.deviceFit.level == DeviceFitLevel.RECOMMENDED,
+        )
+        val job = DoraJob(kind = JobKind.DOWNLOAD, label = file.filename, state = JobState.RUNNING, message = "Starting secure download")
+        _uiState.update { it.copy(jobs = it.jobs + job, activeDownloadId = modelId, toastMessage = null) }
+        viewModelScope.launch {
+            val result = modelDownloadManager.download(
+                ModelDownloadManager.DownloadManifest(model, file.downloadUrl, file.sha256, file.sizeBytes),
+            ) { bytes, total ->
+                val progress = if (total != null && total > 0) (bytes.toFloat() / total).coerceIn(0f, 1f) else 0f
+                updateDownloadJob(job.id, progress, "Downloading ${formatBytes(bytes)}")
+            }
+            val fileResult = result.getOrNull()
+            val nativeValid = fileResult?.let { withContext(Dispatchers.Default) { NativeLlamaEngine.validateModel(it.absolutePath) } } == true
+            if (!nativeValid) fileResult?.delete()
+            val finalResult = if (nativeValid) result else Result.failure(IllegalStateException("Dora could not load this GGUF on this ARM64 device"))
+            finalResult.fold(
+                onSuccess = { downloaded ->
+                    registry.setArtifact(LocalRegistry.StoredArtifact(modelId, file.filename, downloaded.absolutePath, downloaded.length(), file.sha256.orEmpty(), file.repoId, file.filename, file.revision, file.downloadUrl, file.license))
+                    _uiState.update { state ->
+                        val installed = model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = true, filePath = downloaded.absolutePath)
+                        state.copy(models = (state.models.filterNot { it.id == modelId } + installed), activeDownloadId = null, toastMessage = "Model ready: ${file.filename}")
+                    }
+                    updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE)
+                },
+                onFailure = { error ->
+                    updateDownloadJob(job.id, 0f, error.message ?: "Model download failed", JobState.FAILED)
+                    _uiState.update { it.copy(activeDownloadId = null, toastMessage = error.message ?: "Model download failed") }
+                },
+            )
+        }
+    }
+
+    private fun updateDownloadJob(id: String, progress: Float, message: String, state: JobState = JobState.RUNNING) {
+        _uiState.update { current -> current.copy(jobs = current.jobs.map { job -> if (job.id == id) job.copy(progress = progress, message = message, state = state) else job }) }
+    }
 
     fun toggleOfflineOnly() {
         val value = !_uiState.value.isOfflineOnly
