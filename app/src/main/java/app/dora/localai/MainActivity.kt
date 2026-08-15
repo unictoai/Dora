@@ -9,14 +9,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,28 +25,21 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.NetworkCheck
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.WarningAmber
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -71,6 +65,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -78,7 +73,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.dora.localai.data.DoraUiState
 import app.dora.localai.data.MainViewModel
 import app.dora.localai.domain.ChatMessage
-import app.dora.localai.domain.JobState
 import app.dora.localai.domain.LocalModel
 import app.dora.localai.domain.MessageRole
 import app.dora.localai.domain.ModelInstallState
@@ -93,13 +87,25 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class DoraTab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
+private data class DoraDestination(
+    val label: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+)
 
 @Composable
 fun DoraApp(vm: MainViewModel = viewModel()) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::importGguf)
+    }
+    val hasModel = state.models.any { it.kind == ModelKind.TEXT && it.filePath != null }
+    val destinations = listOf(
+        DoraDestination("Chat", Icons.Default.ChatBubbleOutline),
+        DoraDestination("Models", Icons.Default.Memory),
+        DoraDestination("Settings", Icons.Default.Settings),
+    )
 
     LaunchedEffect(state.toastMessage) {
         state.toastMessage?.let {
@@ -108,24 +114,26 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
         }
     }
 
-    val tabs = listOf(
-        DoraTab("Home", Icons.Default.Home),
-        DoraTab("Chat", Icons.Default.ChatBubbleOutline),
-        DoraTab("Create", Icons.Default.AutoAwesome),
-        DoraTab("Models", Icons.Default.Memory),
-        DoraTab("Settings", Icons.Default.Settings),
-    )
+    if (!hasModel) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            ModelSetupScreen(onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) })
+        }
+        SnackbarHost(hostState = snackbarHostState)
+        return
+    }
 
     Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets(0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             NavigationBar(modifier = Modifier.navigationBarsPadding()) {
-                tabs.forEachIndexed { index, tab ->
+                destinations.forEachIndexed { index, destination ->
                     NavigationBarItem(
                         selected = state.selectedTab == index,
                         onClick = { vm.selectTab(index) },
-                        icon = { Icon(tab.icon, contentDescription = tab.label) },
-                        label = { Text(tab.label) },
+                        icon = { Icon(destination.icon, contentDescription = destination.label) },
+                        label = { Text(destination.label) },
                     )
                 }
             }
@@ -133,10 +141,8 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             when (state.selectedTab) {
-                0 -> HomeScreen(state, onNavigate = vm::selectTab)
-                1 -> ChatScreen(state, vm)
-                2 -> ImageStudioScreen(state, vm)
-                3 -> ModelsScreen(state, vm)
+                0 -> ChatScreen(state, vm)
+                1 -> ModelsScreen(state, vm, onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) })
                 else -> SettingsScreen(state, vm)
             }
         }
@@ -144,101 +150,54 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
 }
 
 @Composable
-private fun PageColumn(content: @Composable ColumnScope.() -> Unit) {
+private fun ModelSetupScreen(onImport: () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(horizontal = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) { content() }
-}
-
-@Composable
-private fun ScreenHeader(title: String, subtitle: String? = null) {
-    Column(modifier = Modifier.padding(top = 24.dp)) {
-        Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        subtitle?.let {
-            Spacer(Modifier.height(4.dp))
-            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun HomeScreen(state: DoraUiState, onNavigate: (Int) -> Unit) {
-    PageColumn {
-        ScreenHeader("Good to see you.", "Dora keeps your AI work on your device.")
-        PrivacyBanner(state.isOfflineOnly)
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(10.dp))
-                    Text("Your local AI studio", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                }
-                Text(
-                    "Choose a verified model, see what your phone can handle, and generate without a required cloud account.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Button(onClick = { onNavigate(3) }) { Text("Explore models") }
-            }
-        }
-        Text("Start here", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeActionCard("Chat locally", Icons.Default.ChatBubbleOutline, Modifier.weight(1f)) { onNavigate(1) }
-            HomeActionCard("Create image", Icons.Default.Image, Modifier.weight(1f)) { onNavigate(2) }
-        }
-        RuntimeCard(state.runtimeNotice)
-        Text("Privacy by design", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            "Dora’s inference path is local-first. Model downloads are separate, explicit actions, and no model weights are bundled into this starter build.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-    }
-}
-
-@Composable
-private fun HomeActionCard(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(18.dp)) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Text(label, fontWeight = FontWeight.SemiBold)
-            Text("Private by default", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun PrivacyBanner(offlineOnly: Boolean) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = if (offlineOnly) Color(0xFFE4F7EF) else Color(0xFFFFF3D7)),
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(if (offlineOnly) Icons.Default.Lock else Icons.Default.NetworkCheck, null, tint = if (offlineOnly) Color(0xFF1D7A52) else Color(0xFF9A6700))
-            Spacer(Modifier.width(10.dp))
-            Column {
-                Text(if (offlineOnly) "Offline-only mode" else "Model downloads can use the network", fontWeight = FontWeight.SemiBold)
-                Text(if (offlineOnly) "Inference is designed to stay on this device." else "Dora will explain each download before it starts.", style = MaterialTheme.typography.bodySmall)
+        Surface(
+            modifier = Modifier.size(72.dp),
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text("D", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
             }
         }
+        Spacer(Modifier.height(28.dp))
+        Text("Set up Dora", style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "Bring a GGUF model to your phone. Dora validates it, keeps it private, and uses it locally for chat.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(28.dp))
+        SetupPoint("Private by default", "No account and no required cloud inference.")
+        SetupPoint("Your model, your storage", "Dora stores imported files inside its private app space.")
+        SetupPoint("Transparent runtime", "Dora tells you when native inference is active.")
+        Spacer(Modifier.height(30.dp))
+        Button(onClick = onImport, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)) {
+            Icon(Icons.Default.Download, contentDescription = null)
+            Spacer(Modifier.width(10.dp))
+            Text("Import a GGUF model")
+        }
+        Spacer(Modifier.height(12.dp))
+        Text("GGUF files only • model weights are not bundled", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
-private fun RuntimeCard(notice: String) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
-        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.WarningAmber, null, tint = MaterialTheme.colorScheme.tertiary)
-            Spacer(Modifier.width(10.dp))
-            Column {
-                Text("Runtime status", fontWeight = FontWeight.SemiBold)
-                Text(notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+private fun SetupPoint(title: String, description: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.Top) {
+        Surface(modifier = Modifier.size(8.dp).padding(top = 6.dp), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primary) {}
+        Spacer(Modifier.width(14.dp))
+        Column {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -246,52 +205,34 @@ private fun RuntimeCard(notice: String) {
 @Composable
 private fun ChatScreen(state: DoraUiState, vm: MainViewModel) {
     val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: state.conversations.first()
-    PageColumn {
-        ScreenHeader("Local chat", "Stream a response from the active on-device model.")
-        AssistChip(onClick = { vm.selectTab(3) }, label = { Text("Dora Starter • ${if (state.isGenerating) "generating" else "ready"}") }, leadingIcon = { Icon(Icons.Default.Memory, null) })
-        ChatHistory(conversation.messages, modifier = Modifier.weight(1f, fill = true))
-        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+    val activeModel = state.models.firstOrNull { it.kind == ModelKind.TEXT && it.filePath != null }
+    Column(
+        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp),
+    ) {
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Dora", style = MaterialTheme.typography.headlineSmall)
+                Text(activeModel?.name ?: "Local chat", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            LocalStatus(isGenerating = state.isGenerating)
+            IconButton(onClick = { vm.selectTab(2) }) {
+                Icon(Icons.Default.MoreHoriz, contentDescription = "Settings")
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.65f))
+        ChatHistory(conversation.messages, modifier = Modifier.weight(1f).fillMaxWidth())
+        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
             OutlinedTextField(
                 value = state.composerText,
                 onValueChange = vm::setComposerText,
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Ask Dora something local…") },
-                maxLines = 4,
+                placeholder = { Text("Message Dora") },
+                maxLines = 5,
+                shape = RoundedCornerShape(18.dp),
             )
-            IconButton(onClick = { if (state.isGenerating) vm.stopGeneration() else vm.sendMessage() }, modifier = Modifier.size(52.dp)) {
-                Icon(if (state.isGenerating) Icons.Default.StopCircle else Icons.AutoMirrored.Filled.Send, contentDescription = if (state.isGenerating) "Stop" else "Send", tint = MaterialTheme.colorScheme.primary)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatHistory(messages: List<ChatMessage>, modifier: Modifier = Modifier) {
-    if (messages.isEmpty()) {
-        Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Text("Your private conversation will appear here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        return
-    }
-    LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        items(messages, key = { it.id }) { message ->
-            val isUser = message.role == MessageRole.USER
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
-                Surface(
-                    color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.fillMaxWidth(if (isUser) 0.86f else 0.94f),
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text(if (isUser) "You" else "Dora", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(4.dp))
-                        Text(message.text.ifBlank { "…" }, style = MaterialTheme.typography.bodyLarge)
-                        if (message.isPartial) {
-                            Spacer(Modifier.height(6.dp))
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        }
-                    }
+            Surface(modifier = Modifier.size(52.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.primary) {
+                IconButton(onClick = { if (state.isGenerating) vm.stopGeneration() else vm.sendMessage() }) {
+                    Icon(if (state.isGenerating) Icons.Default.StopCircle else Icons.AutoMirrored.Filled.Send, contentDescription = if (state.isGenerating) "Stop" else "Send", tint = MaterialTheme.colorScheme.onPrimary)
                 }
             }
         }
@@ -299,134 +240,132 @@ private fun ChatHistory(messages: List<ChatMessage>, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun ImageStudioScreen(state: DoraUiState, vm: MainViewModel) {
-    PageColumn {
-        ScreenHeader("Image studio", "A capability-aware local generation workflow.")
-        RuntimeCard("${state.runtimeNotice}. Image runtime is not bundled yet.")
-        OutlinedTextField(
-            value = state.imagePrompt,
-            onValueChange = vm::setImagePrompt,
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 4,
-            label = { Text("Prompt") },
-            placeholder = { Text("Describe the image you want to create…") },
-        )
-        Text("Safe preset", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = true, onClick = {}, label = { Text("Fast draft") })
-            FilterChip(selected = false, onClick = {}, label = { Text("512 × 512") })
-        }
-        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
-            Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Memory, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(10.dp))
-                Text("Dora will show memory, heat, and duration estimates once a runtime is verified on real Android devices.", style = MaterialTheme.typography.bodyMedium)
+private fun LocalStatus(isGenerating: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Surface(modifier = Modifier.size(7.dp), shape = RoundedCornerShape(7.dp), color = if (isGenerating) MaterialTheme.colorScheme.primary else Color(0xFF34A853)) {}
+        Text(if (isGenerating) "Working" else "On device", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ChatHistory(messages: List<ChatMessage>, modifier: Modifier) {
+    if (messages.isEmpty()) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("What can Dora help with?", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(8.dp))
+                Text("Your conversation stays on this device.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Button(onClick = vm::generateImage, modifier = Modifier.fillMaxWidth()) { Text("Start local image job") }
-        state.jobs.filter { it.kind == app.dora.localai.domain.JobKind.IMAGE }.lastOrNull()?.let { job ->
-            JobCard(job)
+        return
+    }
+    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(18.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 20.dp, bottom = 12.dp)) {
+        items(messages, key = { it.id }) { message -> MessageBubble(message) }
+    }
+}
+
+@Composable
+private fun MessageBubble(message: ChatMessage) {
+    val isUser = message.role == MessageRole.USER
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
+        Column(modifier = Modifier.fillMaxWidth(if (isUser) 0.84f else 0.94f)) {
+            Text(if (isUser) "You" else "Dora", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(4.dp))
+            Text(message.text.ifBlank { "…" }, style = MaterialTheme.typography.bodyLarge)
+            if (message.isPartial) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
         }
     }
 }
 
 @Composable
-private fun ModelsScreen(state: DoraUiState, vm: MainViewModel) {
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let(vm::importGguf)
-    }
-    PageColumn {
-        ScreenHeader("Models", "Install only what Dora can explain and validate.")
-        OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) }, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Download, null)
+private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit) {
+    val models = state.models.filter { it.kind == ModelKind.TEXT }
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
+        ScreenHeader("Models", "Import and manage the files Dora runs locally.")
+        Spacer(Modifier.height(18.dp))
+        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(16.dp)) {
+            Icon(Icons.Default.Download, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text("Import a local model")
+            Text("Import another GGUF")
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-            items(state.models, key = { it.id }) { model -> ModelCard(model, vm) }
+        Spacer(Modifier.height(20.dp))
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
+            items(models, key = { it.id }) { model -> ModelCard(model, vm) }
         }
     }
 }
 
 @Composable
 private fun ModelCard(model: LocalModel, vm: MainViewModel) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    val imported = model.filePath != null
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.Top) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(model.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("${model.publisher} • ${model.kind.name.lowercase().replaceFirstChar { it.uppercase() }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(model.name, style = MaterialTheme.typography.titleMedium)
+                    Text(if (imported) "Ready for local chat" else "No model file imported", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (model.verified) Icon(Icons.Default.CheckCircle, "Verified", tint = Color(0xFF1D7A52))
+                if (imported) Icon(Icons.Default.CheckCircle, contentDescription = "Ready", tint = Color(0xFF34A853))
             }
-            Text(model.description, style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip(onClick = {}, label = { Text(model.format) })
-                AssistChip(onClick = {}, label = { Text(model.sizeLabel) })
-            }
-            Text(model.memoryLabel, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("License: ${model.license}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                when (model.installState) {
-                    ModelInstallState.INSTALLED -> {
-                        Button(onClick = {}, modifier = Modifier.weight(1f)) { Text("Installed") }
-                        IconButton(onClick = { vm.deleteModel(model.id) }) { Icon(Icons.Default.DeleteOutline, "Remove model") }
-                    }
-                    else -> Button(onClick = { vm.installModel(model.id) }, modifier = Modifier.fillMaxWidth()) { Text("Add to local registry") }
+            Text(if (imported) "${model.format} • ${model.sizeLabel}" else "Choose a .gguf file from your device to use this model.", style = MaterialTheme.typography.bodyMedium)
+            if (imported) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Active local model", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { vm.deleteModel(model.id) }) { Icon(Icons.Default.DeleteOutline, contentDescription = "Remove model") }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun JobCard(job: app.dora.localai.domain.DoraJob) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(if (job.state == JobState.FAILED) Icons.Default.WarningAmber else Icons.Default.MoreHoriz, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(8.dp))
-                Text(job.label, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                Text(job.state.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelMedium)
-            }
-            if (job.state == JobState.RUNNING) LinearProgressIndicator(progress = { job.progress }, modifier = Modifier.fillMaxWidth())
-            Text(job.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
 @Composable
 private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
-    PageColumn {
-        ScreenHeader("Settings & privacy", "Understand what Dora stores and when it can use the network.")
-        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
-            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Lock, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Offline-only inference", fontWeight = FontWeight.SemiBold)
-                    Text("No required cloud account or remote inference path.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Switch(checked = state.isOfflineOnly, onCheckedChange = { vm.toggleOfflineOnly() })
-            }
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
+        ScreenHeader("Settings", "Simple controls for a private local app.")
+        Spacer(Modifier.height(16.dp))
+        SettingRow(Icons.Default.Lock, "Offline-only mode", "Inference never needs a cloud account or remote fallback.") {
+            Switch(checked = state.isOfflineOnly, onCheckedChange = { vm.toggleOfflineOnly() })
         }
-        SettingRow(Icons.Default.Storage, "Local storage", "Models, chats, images, and job metadata remain on this device.")
-        SettingRow(Icons.Default.Memory, "Device fit", state.deviceSummary)
-        SettingRow(Icons.Default.NetworkCheck, "Network policy", "Only explicit model acquisition may use the network in the planned production build.")
-        Text("Runtime status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(state.runtimeNotice, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        HorizontalDivider()
+        SettingRow(Icons.Default.Memory, "Device", state.deviceSummary)
+        HorizontalDivider()
+        SettingRow(Icons.Default.Storage, "Storage", "Imported models stay in Dora’s private app storage.")
+        HorizontalDivider()
+        SettingRow(Icons.Default.Info, "Runtime", state.runtimeNotice)
+        Spacer(Modifier.height(24.dp))
         TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
+        Spacer(Modifier.height(12.dp))
+        Text("Dora 0.2.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
 }
 
 @Composable
-private fun SettingRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, description: String) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
-        Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(12.dp))
-        Column {
+private fun ScreenHeader(title: String, subtitle: String) {
+    Column(modifier = Modifier.padding(top = 18.dp)) {
+        Text(title, style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(5.dp))
+        Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun SettingRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    description: String,
+    trailing: (@Composable () -> Unit)? = null,
+) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 17.dp), verticalAlignment = Alignment.Top) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(3.dp))
             Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        trailing?.invoke()
     }
 }

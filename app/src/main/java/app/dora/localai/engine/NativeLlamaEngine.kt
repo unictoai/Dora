@@ -23,7 +23,7 @@ object NativeLlamaEngine {
 
     fun version(): String = nativeVersion()
 
-    fun validateModel(path: String): Boolean = nativeValidateModel(path)
+    fun validateModel(path: String): Boolean = isAvailable() && runCatching { nativeValidateModel(path) }.getOrDefault(false)
 
     fun cancel() {
         if (isAvailable()) nativeCancel()
@@ -40,8 +40,7 @@ object NativeLlamaEngine {
 
 class NativeStableDiffusionImageEngine : ImageInferenceEngine {
     override val displayName: String = "stable-diffusion.cpp isolated native"
-    override val isProductionReady: Boolean
-        get() = NativeLlamaEngine.isAvailable()
+    override val isProductionReady: Boolean = false
 
     override suspend fun generate(model: LocalModel, prompt: String): Result<String> =
         Result.failure(UnsupportedOperationException("An output path and validated image model bundle are required."))

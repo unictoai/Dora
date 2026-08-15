@@ -120,7 +120,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAllLocalData() {
         registry.clearAll()
-        _uiState.update { DoraUiState(activeConversationId = it.conversations.firstOrNull()?.id.orEmpty(), toastMessage = "Local registry cleared") }
+        val freshConversation = Conversation(title = "New local conversation")
+        _uiState.value = DoraUiState(
+            conversations = listOf(freshConversation),
+            activeConversationId = freshConversation.id,
+            toastMessage = "Local data deleted",
+        )
     }
 
     fun clearToast() = _uiState.update { it.copy(toastMessage = null) }
@@ -128,21 +133,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun importGguf(uri: Uri) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { modelStore.importGguf(uri) }
-            result.onSuccess { artifact ->
-                registry.setArtifact(LocalRegistry.StoredArtifact(starterTextModel.id, artifact.name, artifact.path, artifact.sizeBytes, artifact.sha256))
-                _uiState.update { state ->
-                    state.copy(models = state.models.map { model ->
-                        if (model.id == starterTextModel.id) model.copy(
-                            name = artifact.name,
-                            installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
-                            verified = true,
-                            filePath = artifact.path,
-                            sizeLabel = formatBytes(artifact.sizeBytes),
-                        ) else model
-                    }, toastMessage = "GGUF validated: ${artifact.name}")
-                }
-            }.onFailure { error ->
-                _uiState.update { it.copy(toastMessage = error.message ?: "GGUF import failed") }
+            val artifact = result.getOrNull()
+            if (artifact == null) {
+                _uiState.update { it.copy(toastMessage = result.exceptionOrNull()?.message ?: "GGUF import failed") }
+                return@launch
+            }
+            val nativeValid = withContext(Dispatchers.Default) {
+                NativeLlamaEngine.isAvailable() && NativeLlamaEngine.validateModel(artifact.path)
+            }
+            if (!nativeValid) {
+                modelStore.delete(artifact.path)
+                _uiState.update { it.copy(toastMessage = "Dora could not load this GGUF on this ARM64 device") }
+                return@launch
+            }
+            registry.setArtifact(LocalRegistry.StoredArtifact(starterTextModel.id, artifact.name, artifact.path, artifact.sizeBytes, artifact.sha256))
+            _uiState.update { state ->
+                state.copy(models = state.models.map { model ->
+                    if (model.id == starterTextModel.id) model.copy(
+                        name = artifact.name,
+                        installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
+                        verified = true,
+                        filePath = artifact.path,
+                        sizeLabel = formatBytes(artifact.sizeBytes),
+                    ) else model
+                }, toastMessage = "Model ready: ${artifact.name}")
             }
         }
     }
