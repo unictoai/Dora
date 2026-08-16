@@ -35,13 +35,27 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build and test
+      - name: Build, test, lint, and assemble release
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 2
-        run: ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --stacktrace
+        run: ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug --no-daemon --stacktrace
+
+      - name: Verify ARM64 native library is packaged
+        run: unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -F 'lib/arm64-v8a/libdora_native.so'
+
+      - name: Verify Room schema fixture is committed
+        run: |
+          test -s app/schemas/app.dora.localai.data.DoraDatabase/2.json
+          git diff --exit-code -- app/schemas/app.dora.localai.data.DoraDatabase/2.json
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: dora-debug-arm64
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dora-release-arm64
+          path: app/build/outputs/apk/release/app-release.apk

@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 private val starterTextModel = LocalModel(
@@ -93,6 +94,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val deviceProfile = DeviceProfile(application)
     private val huggingFaceClient = HuggingFaceClient(deviceProfile)
     private val workManager = WorkManager.getInstance(application)
+    private val reconciler = RegistryReconciler(application, registry, dao)
     private val textEngine = DoraDemoTextEngine()
     private val nativeTextEngine = NativeLlamaTextEngine()
     private val imageEngine = DoraDemoImageEngine()
@@ -147,6 +149,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             dao.observeJobs().collect { records ->
                 _uiState.update { state -> state.copy(jobs = records.map(::toDoraJob)) }
+            }
+        }
+        viewModelScope.launch {
+            val report = withContext(Dispatchers.IO) { reconciler.reconcile() }
+            if (report.messages.isNotEmpty()) {
+                _uiState.update { state ->
+                    val repairedModels = state.models.map { model ->
+                        val artifact = registry.artifact(model.id)
+                        val valid = artifact != null && !registry.isArtifactInvalid(model.id) && File(artifact.path).exists()
+                        if (artifact == null) model else model.copy(
+                            installState = if (valid) app.dora.localai.domain.ModelInstallState.INSTALLED else app.dora.localai.domain.ModelInstallState.INVALID,
+                            verified = valid,
+                            filePath = artifact.path,
+                        )
+                    }
+                    state.copy(models = repairedModels, toastMessage = report.messages.first())
+                }
             }
         }
     }

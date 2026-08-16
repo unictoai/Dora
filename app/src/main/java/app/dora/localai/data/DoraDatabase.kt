@@ -54,6 +54,9 @@ interface DoraDao {
     @Query("SELECT * FROM model_records WHERE id = :id LIMIT 1")
     suspend fun findModel(id: String): ModelRecord?
 
+    @Query("SELECT * FROM model_records ORDER BY updatedAt DESC")
+    suspend fun allModels(): List<ModelRecord>
+
     @Query("SELECT * FROM job_records ORDER BY updatedAt DESC")
     fun observeJobs(): Flow<List<JobRecord>>
 
@@ -64,7 +67,7 @@ interface DoraDao {
     suspend fun deleteJob(id: String)
 }
 
-@Database(entities = [ModelRecord::class, JobRecord::class], version = 2, exportSchema = false)
+@Database(entities = [ModelRecord::class, JobRecord::class], version = 2, exportSchema = true)
 abstract class DoraDatabase : RoomDatabase() {
     abstract fun dao(): DoraDao
 

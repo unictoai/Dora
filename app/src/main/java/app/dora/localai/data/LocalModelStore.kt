@@ -29,7 +29,9 @@ class LocalModelStore(private val context: Context) {
         }
 
         require(temporary.length() >= MIN_GGUF_BYTES) { "The selected model is too small to be a valid GGUF file." }
-        require(hasGgufMagic(temporary)) { "The selected file does not contain the GGUF header." }
+        GgufValidator.validate(temporary).getOrElse { error ->
+            throw IllegalArgumentException("The selected file is not a supported GGUF artifact: ${error.message}", error)
+        }
 
         val hash = sha256(temporary)
         val id = "import-${hash.take(16)}"
@@ -59,11 +61,6 @@ class LocalModelStore(private val context: Context) {
             if (cursor.moveToFirst()) return cursor.getString(0)
         }
         return uri.lastPathSegment?.substringAfterLast('/')
-    }
-
-    private fun hasGgufMagic(file: File): Boolean = FileInputStream(file).use { input ->
-        val header = ByteArray(4)
-        input.read(header) == 4 && header.contentEquals(byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte()))
     }
 
     private fun sha256(file: File): String {

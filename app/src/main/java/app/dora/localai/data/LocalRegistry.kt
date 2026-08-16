@@ -34,6 +34,7 @@ class LocalRegistry(context: Context) {
     }
 
     fun setArtifact(artifact: StoredArtifact) {
+        prefs.edit().putStringSet(KEY_INVALID_ARTIFACTS, invalidArtifactIds() - artifact.id).apply()
         prefs.edit()
             .putStringSet(KEY_INSTALLED_MODELS, installedModelIds() + artifact.id)
             .putString(artifactKey(artifact.id, "path"), artifact.path)
@@ -49,6 +50,14 @@ class LocalRegistry(context: Context) {
     }
 
     fun allArtifacts(): List<StoredArtifact> = installedModelIds().mapNotNull(::artifact)
+
+    fun invalidArtifactIds(): Set<String> = prefs.getStringSet(KEY_INVALID_ARTIFACTS, emptySet()).orEmpty()
+
+    fun markArtifactInvalid(id: String) {
+        prefs.edit().putStringSet(KEY_INVALID_ARTIFACTS, invalidArtifactIds() + id).apply()
+    }
+
+    fun isArtifactInvalid(id: String): Boolean = id in invalidArtifactIds()
 
     fun artifact(id: String): StoredArtifact? {
         val path = prefs.getString(artifactKey(id, "path"), null) ?: return null
@@ -75,5 +84,6 @@ class LocalRegistry(context: Context) {
     private companion object {
         const val KEY_OFFLINE_ONLY = "offline_only"
         const val KEY_INSTALLED_MODELS = "installed_models"
+        const val KEY_INVALID_ARTIFACTS = "invalid_artifacts"
     }
 }

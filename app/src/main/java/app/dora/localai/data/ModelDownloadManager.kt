@@ -78,7 +78,9 @@ class ModelDownloadManager(context: Context) {
         manifest.expectedSha256?.takeIf { it.isNotBlank() }?.let { expected ->
             require(actualHash.equals(expected, ignoreCase = true)) { "Model checksum mismatch." }
         }
-        require(hasGgufMagic(partialFile)) { "The downloaded file is not a valid GGUF artifact." }
+        GgufValidator.validate(partialFile).getOrElse { error ->
+            throw IllegalArgumentException("The downloaded file is not a supported GGUF artifact: ${error.message}", error)
+        }
         if (finalFile.exists()) finalFile.delete()
         check(partialFile.renameTo(finalFile)) { "Could not finalize the downloaded model." }
         return finalFile
@@ -141,11 +143,6 @@ class ModelDownloadManager(context: Context) {
         ?.substringAfter('/')
         ?.toLongOrNull()
         ?.takeIf { it > 0L }
-
-    private fun hasGgufMagic(file: File): Boolean = file.inputStream().use { input ->
-        val magic = ByteArray(4)
-        input.read(magic) == 4 && magic.contentEquals(byteArrayOf(0x47, 0x47, 0x55, 0x46))
-    }
 
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")

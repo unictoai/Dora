@@ -9,8 +9,8 @@
 #include "llama.h"
 
 namespace {
-constexpr const char * kTag = "DoraNative";
 std::once_flag backend_once;
+std::mutex runtime_mutex;
 std::atomic_bool cancel_requested{false};
 
 void ensure_backend() {
@@ -44,6 +44,8 @@ Java_app_dora_localai_engine_NativeLlamaEngine_nativeValidateModel(
     jstring model_path
 ) {
     ensure_backend();
+    std::unique_lock<std::mutex> runtime_lock(runtime_mutex, std::try_to_lock);
+    if (!runtime_lock.owns_lock()) return JNI_FALSE;
     const std::string path = jstring_to_string(env, model_path);
     if (path.empty()) return JNI_FALSE;
 
@@ -71,6 +73,8 @@ Java_app_dora_localai_engine_NativeLlamaEngine_nativeGenerate(
     jint threads
 ) {
     ensure_backend();
+    std::unique_lock<std::mutex> runtime_lock(runtime_mutex, std::try_to_lock);
+    if (!runtime_lock.owns_lock()) return string_to_jstring(env, "Dora native error: another model operation is already running.");
     cancel_requested.store(false);
 
     const std::string path = jstring_to_string(env, model_path);

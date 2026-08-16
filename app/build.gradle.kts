@@ -5,6 +5,12 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.generateKotlin", "true")
+    arg("room.incremental", "true")
+}
+
 android {
     namespace = "app.dora.localai"
     compileSdk = 35
@@ -14,8 +20,8 @@ android {
         applicationId = "app.dora.localai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.3.1"
+        versionCode = 5
+        versionName = "0.4.0-prealpha"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
