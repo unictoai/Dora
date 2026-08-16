@@ -6,15 +6,17 @@ import android.content.Context
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
-import androidx.work.ForegroundInfo
 import androidx.work.Data
+import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import app.dora.localai.DoraApplication
+import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.JobState
 import app.dora.localai.domain.LocalModel
 import app.dora.localai.domain.ModelInstallState
 import app.dora.localai.domain.ModelKind
 import app.dora.localai.engine.NativeLlamaEngine
+import java.io.File
 import java.util.UUID
 
 class DoraModelDownloadWorker(
@@ -22,9 +24,10 @@ class DoraModelDownloadWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(context, params) {
     private val dao = (applicationContext as DoraApplication).database.dao()
+    private val controls = DownloadControlStore(applicationContext)
 
     override suspend fun doWork(): Result {
-        setForeground(createForegroundInfo(0f))
+        setForeground(createForegroundInfo(0f, DownloadState.STARTING))
         val jobId = inputData.getString(KEY_JOB_ID) ?: return Result.failure()
         val modelId = inputData.getString(KEY_MODEL_ID) ?: return Result.failure()
         val modelName = inputData.getString(KEY_MODEL_NAME) ?: modelId
@@ -33,9 +36,31 @@ class DoraModelDownloadWorker(
         val expectedBytes = inputData.getLong(KEY_BYTES, -1L).takeIf { it > 0L }
         val sourceRepo = inputData.getString(KEY_SOURCE_REPO)
         val sourceFilename = inputData.getString(KEY_SOURCE_FILENAME)
-        val sourceRevision = inputData.getString(KEY_SOURCE_REVISION)
         val sourceLicense = inputData.getString(KEY_SOURCE_LICENSE)
-        val record = JobRecord(jobId, "DOWNLOAD", modelName, JobState.RUNNING.name, 0f, "Starting secure download", System.currentTimeMillis())
+        val startedAt = System.currentTimeMillis()
+        val safeId = modelId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val temporaryPath = File(applicationContext.filesDir, "models/$safeId.part").absolutePath
+        val record = JobRecord(
+            id = jobId,
+            kind = "DOWNLOAD",
+            label = modelName,
+            state = JobState.RUNNING.name,
+            progress = 0f,
+            message = "Starting secure download",
+            updatedAt = startedAt,
+            downloadId = jobId,
+            modelId = modelId,
+            repositoryId = sourceRepo,
+            filename = sourceFilename ?: modelName,
+            sourceRevision = inputData.getString(KEY_SOURCE_REVISION),
+            sourceLicense = sourceLicense,
+            url = url,
+            expectedSha256 = expectedSha256.takeIf { it.isNotBlank() },
+            downloadState = DownloadState.STARTING.name,
+            totalBytes = expectedBytes,
+            startedAt = startedAt,
+            temporaryPath = temporaryPath,
+        )
         dao.upsertJob(record)
 
         val model = LocalModel(
@@ -52,24 +77,102 @@ class DoraModelDownloadWorker(
             verified = false,
             recommended = false,
         )
-        val result = ModelDownloadManager(applicationContext).download(
-            ModelDownloadManager.DownloadManifest(model, url, expectedSha256.takeIf { it.isNotBlank() }, expectedBytes),
-        ) { bytes, total ->
-            val progress = if (total != null && total > 0) (bytes.toFloat() / total).coerceIn(0f, 1f) else 0f
-            setProgress(Data.Builder().putDownloadProgress(bytes, progress).build())
-            setForeground(createForegroundInfo(progress))
-            dao.upsertJob(record.copy(progress = progress, message = "Downloading ${bytes / 1024 / 1024} MB", updatedAt = System.currentTimeMillis()))
+        val telemetry = DownloadTelemetry(expectedBytes)
+        val result = try {
+            ModelDownloadManager(applicationContext).download(
+                ModelDownloadManager.DownloadManifest(model, url, expectedSha256.takeIf { it.isNotBlank() }, expectedBytes),
+            ) { bytes, total ->
+                val sample = telemetry.update(bytes)
+                val percent = sample.progressPercent ?: 0
+                val state = if (percent >= 100) DownloadState.VERIFYING else if (bytes > 0L) DownloadState.DOWNLOADING else DownloadState.STARTING
+                val progress = percent / 100f
+                val progressData = Data.Builder()
+                    .putDownloadProgress(bytes, progress)
+                    .putLong(KEY_SPEED_BYTES_PER_SECOND, sample.speedBytesPerSecond ?: -1L)
+                    .putLong(KEY_ETA_MILLIS, sample.estimatedRemainingTimeMillis ?: -1L)
+                    .putString(KEY_DOWNLOAD_STATE, state.name)
+                    .build()
+                setProgress(progressData)
+                setForeground(createForegroundInfo(progress, state))
+                if (sample.shouldPersist || state == DownloadState.VERIFYING) {
+                    dao.upsertJob(record.copy(
+                        state = JobState.RUNNING.name,
+                        progress = progress,
+                        message = if (state == DownloadState.VERIFYING) "Download complete; verifying artifact" else buildProgressMessage(sample),
+                        updatedAt = sample.updatedAt,
+                        downloadState = state.name,
+                        bytesDownloaded = sample.bytesDownloaded,
+                        totalBytes = sample.totalBytes,
+                        speedBytesPerSecond = sample.speedBytesPerSecond,
+                        estimatedRemainingTimeMillis = sample.estimatedRemainingTimeMillis,
+                        elapsedTimeMillis = sample.elapsedTimeMillis,
+                    ))
+                }
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            val paused = controls.isPauseRequested(jobId)
+            val userCancelled = controls.isCancelRequested(jobId)
+            if (userCancelled) {
+                File(temporaryPath).delete()
+            }
+            dao.upsertJob(record.copy(
+                state = if (paused && !userCancelled) JobState.RUNNING.name else JobState.CANCELED.name,
+                message = if (paused && !userCancelled) "Paused — partial download retained" else "Download cancelled",
+                updatedAt = System.currentTimeMillis(),
+                downloadState = if (paused && !userCancelled) DownloadState.PAUSED.name else DownloadState.CANCELLED.name,
+                errorMessage = null,
+            ))
+            if (userCancelled) controls.clear(jobId)
+            throw cancelled
         }
 
         return result.fold(
             onSuccess = { file ->
+                val verifyingAt = System.currentTimeMillis()
+                dao.upsertJob(record.copy(
+                    state = JobState.RUNNING.name,
+                    progress = 1f,
+                    message = "Verifying checksum and GGUF header",
+                    updatedAt = verifyingAt,
+                    downloadState = DownloadState.VERIFYING.name,
+                    bytesDownloaded = file.length(),
+                    totalBytes = file.length(),
+                    finalPath = file.absolutePath,
+                ))
+                dao.upsertJob(record.copy(
+                    state = JobState.RUNNING.name,
+                    progress = 1f,
+                    message = "Validating with llama.cpp",
+                    updatedAt = System.currentTimeMillis(),
+                    downloadState = DownloadState.VALIDATING.name,
+                    bytesDownloaded = file.length(),
+                    totalBytes = file.length(),
+                    finalPath = file.absolutePath,
+                ))
                 val nativeValid = NativeLlamaEngine.isAvailable() && NativeLlamaEngine.validateModel(file.absolutePath)
                 if (!nativeValid) {
                     file.delete()
                     val message = "The file downloaded, but llama.cpp could not load it on this ARM64 device."
-                    dao.upsertJob(record.copy(state = JobState.FAILED.name, message = message, updatedAt = System.currentTimeMillis()))
+                    dao.upsertJob(record.copy(
+                        state = JobState.FAILED.name,
+                        message = message,
+                        updatedAt = System.currentTimeMillis(),
+                        downloadState = DownloadState.FAILED.name,
+                        errorMessage = message,
+                        finalPath = null,
+                    ))
                     return@fold Result.failure(Data.Builder().putError(message).build())
                 }
+                dao.upsertJob(record.copy(
+                    state = JobState.RUNNING.name,
+                    progress = 1f,
+                    message = "Installing model into Dora’s private library",
+                    updatedAt = System.currentTimeMillis(),
+                    downloadState = DownloadState.INSTALLING.name,
+                    bytesDownloaded = file.length(),
+                    totalBytes = file.length(),
+                    finalPath = file.absolutePath,
+                ))
                 dao.upsertModel(
                     ModelRecord(
                         id = modelId,
@@ -84,7 +187,7 @@ class DoraModelDownloadWorker(
                         updatedAt = System.currentTimeMillis(),
                         sourceRepo = sourceRepo,
                         sourceFilename = sourceFilename,
-                        sourceRevision = sourceRevision,
+                        sourceRevision = inputData.getString(KEY_SOURCE_REVISION),
                         sourceUrl = url,
                         sourceLicense = sourceLicense,
                     ),
@@ -98,21 +201,45 @@ class DoraModelDownloadWorker(
                         sha256 = expectedSha256,
                         sourceRepo = sourceRepo,
                         sourceFilename = sourceFilename,
-                        sourceRevision = sourceRevision,
+                        sourceRevision = inputData.getString(KEY_SOURCE_REVISION),
                         sourceUrl = url,
                         sourceLicense = sourceLicense,
                     ),
                 )
-                dao.upsertJob(record.copy(state = JobState.COMPLETE.name, progress = 1f, message = "Validated and installed", updatedAt = System.currentTimeMillis()))
+                dao.upsertJob(record.copy(
+                    state = JobState.COMPLETE.name,
+                    progress = 1f,
+                    message = "Validated and installed",
+                    updatedAt = System.currentTimeMillis(),
+                    downloadState = DownloadState.COMPLETED.name,
+                    bytesDownloaded = file.length(),
+                    totalBytes = file.length(),
+                    finalPath = file.absolutePath,
+                    errorMessage = null,
+                ))
                 Result.success(Data.Builder().putString(KEY_PATH, file.absolutePath).build())
             },
             onFailure = { error ->
                 val message = error.message ?: "Download failed"
                 if (isRetryable(message)) {
-                    dao.upsertJob(record.copy(state = JobState.RUNNING.name, message = "Network interrupted; Dora will retry automatically", updatedAt = System.currentTimeMillis()))
+                    dao.upsertJob(record.copy(
+                        state = JobState.RUNNING.name,
+                        message = "Network interrupted; Dora will retry automatically",
+                        updatedAt = System.currentTimeMillis(),
+                        downloadState = DownloadState.RETRYING.name,
+                        retryCount = runAttemptCount + 1,
+                        errorMessage = message,
+                    ))
                     Result.retry()
                 } else {
-                    dao.upsertJob(record.copy(state = JobState.FAILED.name, message = message, updatedAt = System.currentTimeMillis()))
+                    dao.upsertJob(record.copy(
+                        state = JobState.FAILED.name,
+                        message = message,
+                        updatedAt = System.currentTimeMillis(),
+                        downloadState = DownloadState.FAILED.name,
+                        retryCount = runAttemptCount,
+                        errorMessage = message,
+                    ))
                     Result.failure(Data.Builder().putError(message).build())
                 }
             },
@@ -121,10 +248,28 @@ class DoraModelDownloadWorker(
 
     private fun isRetryable(message: String): Boolean {
         val normalized = message.lowercase()
-        return normalized.contains("timeout") || normalized.contains("connection") || normalized.contains("network") || normalized.contains("http 5") || normalized.contains("reset") || normalized.contains("temporarily")
+        return normalized.contains("timeout") || normalized.contains("connection") || normalized.contains("network") || normalized.contains("http 5") || normalized.contains("http 429") || normalized.contains("reset") || normalized.contains("temporarily")
     }
 
-    private fun createForegroundInfo(progress: Float): ForegroundInfo {
+    private fun buildProgressMessage(sample: DownloadTelemetry.Sample): String {
+        val size = sample.totalBytes?.let { "${formatBytes(sample.bytesDownloaded)} / ${formatBytes(it)}" } ?: "${formatBytes(sample.bytesDownloaded)} downloaded"
+        val speed = sample.speedBytesPerSecond?.let { " • ${formatBytes(it)}/s" }.orEmpty()
+        val eta = sample.estimatedRemainingTimeMillis?.let { " • ~${formatDuration(it)} remaining" }.orEmpty()
+        return "Downloading $size$speed$eta"
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1024L * 1024L * 1024L -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+        bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+        else -> "%.0f KB".format(bytes / 1024.0)
+    }
+
+    private fun formatDuration(millis: Long): String {
+        val seconds = (millis / 1000L).coerceAtLeast(0L)
+        return if (seconds >= 60L) "${seconds / 60L} min" else "$seconds sec"
+    }
+
+    private fun createForegroundInfo(progress: Float, state: DownloadState): ForegroundInfo {
         val manager = applicationContext.getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager?.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Model downloads", NotificationManager.IMPORTANCE_LOW))
@@ -132,8 +277,13 @@ class DoraModelDownloadWorker(
         val percent = (progress * 100).toInt().coerceIn(0, 100)
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("Downloading model")
-            .setContentText(if (percent > 0) "$percent% — Dora is keeping the file private" else "Preparing secure download")
+            .setContentTitle("Dora model download")
+            .setContentText(when (state) {
+                DownloadState.VERIFYING -> "Verifying model integrity"
+                DownloadState.VALIDATING -> "Validating with llama.cpp"
+                DownloadState.INSTALLING -> "Installing into Dora"
+                else -> if (percent > 0) "$percent% — Dora is keeping the file private" else "Preparing secure download"
+            })
             .setProgress(100, percent, percent == 0)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -160,6 +310,9 @@ class DoraModelDownloadWorker(
         const val KEY_SOURCE_LICENSE = "source_license"
         const val KEY_BYTES_DOWNLOADED = "bytes_downloaded"
         const val KEY_PROGRESS = "progress"
+        const val KEY_SPEED_BYTES_PER_SECOND = "speed_bytes_per_second"
+        const val KEY_ETA_MILLIS = "eta_millis"
+        const val KEY_DOWNLOAD_STATE = "download_state"
         const val KEY_PATH = "path"
         const val KEY_ERROR = "error"
 

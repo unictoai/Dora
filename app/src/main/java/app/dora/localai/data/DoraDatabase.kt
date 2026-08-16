@@ -38,6 +38,25 @@ data class JobRecord(
     val progress: Float,
     val message: String,
     val updatedAt: Long,
+    val downloadId: String? = null,
+    val modelId: String? = null,
+    val repositoryId: String? = null,
+    val filename: String? = null,
+    val sourceRevision: String? = null,
+    val sourceLicense: String? = null,
+    val url: String? = null,
+    val expectedSha256: String? = null,
+    val downloadState: String? = null,
+    val bytesDownloaded: Long = 0L,
+    val totalBytes: Long? = null,
+    val speedBytesPerSecond: Long? = null,
+    val estimatedRemainingTimeMillis: Long? = null,
+    val elapsedTimeMillis: Long = 0L,
+    val startedAt: Long? = null,
+    val retryCount: Int = 0,
+    val errorMessage: String? = null,
+    val temporaryPath: String? = null,
+    val finalPath: String? = null,
 )
 
 @androidx.room.Dao
@@ -60,6 +79,12 @@ interface DoraDao {
     @Query("SELECT * FROM job_records ORDER BY updatedAt DESC")
     fun observeJobs(): Flow<List<JobRecord>>
 
+    @Query("SELECT * FROM job_records WHERE id = :id LIMIT 1")
+    suspend fun findJob(id: String): JobRecord?
+
+    @Query("SELECT * FROM job_records WHERE kind = 'DOWNLOAD' ORDER BY updatedAt DESC")
+    suspend fun allDownloadJobs(): List<JobRecord>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertJob(record: JobRecord)
 
@@ -67,7 +92,7 @@ interface DoraDao {
     suspend fun deleteJob(id: String)
 }
 
-@Database(entities = [ModelRecord::class, JobRecord::class], version = 2, exportSchema = true)
+@Database(entities = [ModelRecord::class, JobRecord::class], version = 3, exportSchema = true)
 abstract class DoraDatabase : RoomDatabase() {
     abstract fun dao(): DoraDao
 
@@ -84,9 +109,33 @@ abstract class DoraDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE job_records ADD COLUMN downloadId TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN modelId TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN repositoryId TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN filename TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN sourceRevision TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN sourceLicense TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN url TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN expectedSha256 TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN downloadState TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN bytesDownloaded INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN totalBytes INTEGER")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN speedBytesPerSecond INTEGER")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN estimatedRemainingTimeMillis INTEGER")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN elapsedTimeMillis INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN startedAt INTEGER")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN retryCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN errorMessage TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN temporaryPath TEXT")
+                db.execSQL("ALTER TABLE job_records ADD COLUMN finalPath TEXT")
+            }
+        }
+
         fun get(context: Context): DoraDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, DoraDatabase::class.java, "dora.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
                 .also { instance = it }
         }

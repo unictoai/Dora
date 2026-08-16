@@ -20,8 +20,8 @@ android {
         applicationId = "app.dora.localai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.4.1-prealpha"
+        versionCode = 7
+        versionName = "0.5.0-prealpha"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

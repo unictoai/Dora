@@ -88,3 +88,11 @@ The repository currently verifies Android debug assembly, unit tests, lint, and 
 5. Add persistent conversations and migration fixtures.
 6. Add release-build CI and artifact/security checks.
 7. Reassess image runtime only after the text runtime passes the device gate.
+
+## Specification alignment addendum — 2026-08-16
+
+The attached **Dora Master Product Engineering Specification** is now the active product reference. This pass implements the highest-priority Download Center foundation without replacing the existing architecture. The download domain now has an explicit state machine and structured `DownloadProgress`; Room version 3 persists source provenance, lifecycle state, bytes, speed, ETA, elapsed time, retry count, error, temporary path, and final path; WorkManager remains responsible for background execution; and Compose exposes active, queued, paused, failed, and completed sections with actionable controls and expandable details.
+
+Startup recovery now re-enqueues interrupted download, verification, validation, and installation records when no active unique WorkManager job remains. Pause retains a partial file, cancel removes the private partial file after cancellation is observed, retry reconstructs the original request from Room, and storage preflight reports required versus available bytes. The UI no longer treats every model with a path as ready: invalid or unverified artifacts are surfaced explicitly.
+
+The remaining release-blocking gaps are honest limitations rather than hidden claims. The repository still needs Android integration/failure-injection coverage for HTTP 200/206, redirects, timeouts, network loss, disk exhaustion, pause/resume, process death, duplicate taps, and concurrent delete/import. A physical ARM64 device run is required for notification behavior, native model loading, cancellation, thermal/memory behavior, offline chat, and the complete acceptance workflow. Queue reordering, configurable concurrency, richer metadata fields, persistent conversations, and a native persistent session manager remain follow-up milestones.

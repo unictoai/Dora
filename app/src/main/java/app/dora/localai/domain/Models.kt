@@ -48,4 +48,5 @@ data class DoraJob(
     val state: JobState = JobState.IDLE,
     val progress: Float = 0f,
     val message: String = "",
+    val download: DownloadProgress? = null,
 )

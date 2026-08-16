@@ -13,6 +13,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.dora.localai.DoraApplication
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.DownloadProgress
+import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.DeviceFitLevel
 import app.dora.localai.domain.HuggingFaceCandidate
 import app.dora.localai.domain.HuggingFaceFileCandidate
@@ -85,6 +87,16 @@ data class DoraUiState(
     val huggingFaceCandidates: List<HuggingFaceCandidate> = emptyList(),
     val isSearchingHuggingFace: Boolean = false,
     val activeDownloadId: String? = null,
+    val expandedDownloadId: String? = null,
+    val storageSummary: DoraStorageSummary = DoraStorageSummary(),
+)
+
+data class DoraStorageSummary(
+    val totalBytes: Long = 0L,
+    val availableBytes: Long = 0L,
+    val modelBytes: Long = 0L,
+    val temporaryDownloadBytes: Long = 0L,
+    val orphanedFileCount: Int = 0,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -94,6 +106,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val deviceProfile = DeviceProfile(application)
     private val huggingFaceClient = HuggingFaceClient(deviceProfile)
     private val workManager = WorkManager.getInstance(application)
+    private val downloadControls = DownloadControlStore(application)
     private val reconciler = RegistryReconciler(application, registry, dao)
     private val textEngine = DoraDemoTextEngine()
     private val nativeTextEngine = NativeLlamaTextEngine()
@@ -140,6 +153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isOfflineOnly = registry.isOfflineOnly(),
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
             deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
+            storageSummary = storageSummary(),
         )
     }
 
@@ -168,18 +182,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { recoverInterruptedDownloads() }
+        }
     }
 
-    private fun toDoraJob(record: JobRecord): DoraJob = DoraJob(
-        id = record.id,
-        kind = runCatching { JobKind.valueOf(record.kind) }.getOrDefault(JobKind.DOWNLOAD),
-        label = record.label,
-        state = runCatching { JobState.valueOf(record.state) }.getOrDefault(JobState.FAILED),
-        progress = record.progress,
-        message = record.message,
-    )
+    private suspend fun recoverInterruptedDownloads() {
+        val interruptedStates = setOf(
+            DownloadState.STARTING,
+            DownloadState.DOWNLOADING,
+            DownloadState.VERIFYING,
+            DownloadState.VALIDATING,
+            DownloadState.INSTALLING,
+            DownloadState.RETRYING,
+        )
+        dao.allDownloadJobs().filter { record ->
+            runCatching { DownloadState.valueOf(record.downloadState ?: "") }.getOrNull() in interruptedStates
+        }.forEach { record ->
+            val modelId = record.modelId ?: return@forEach
+            val url = record.url ?: return@forEach
+            val work = runCatching { workManager.getWorkInfosForUniqueWork("download-$modelId").get() }.getOrDefault(emptyList())
+            val active = work.any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.BLOCKED }
+            if (!active) {
+                downloadControls.clear(record.downloadId ?: record.id)
+                val retrying = record.copy(
+                    state = JobState.RUNNING.name,
+                    message = "Recovering interrupted download",
+                    downloadState = DownloadState.RETRYING.name,
+                    retryCount = record.retryCount + 1,
+                    errorMessage = "Recovered after process interruption",
+                    updatedAt = System.currentTimeMillis(),
+                )
+                dao.upsertJob(retrying)
+                workManager.enqueueUniqueWork("download-$modelId", ExistingWorkPolicy.REPLACE, downloadRequest(retrying, url))
+            }
+        }
+    }
+
+    private fun toDoraJob(record: JobRecord): DoraJob {
+        val kind = runCatching { JobKind.valueOf(record.kind) }.getOrDefault(JobKind.DOWNLOAD)
+        val jobState = runCatching { JobState.valueOf(record.state) }.getOrDefault(JobState.FAILED)
+        val download = if (kind == JobKind.DOWNLOAD) {
+            val state = runCatching { DownloadState.valueOf(record.downloadState ?: "") }
+                .getOrDefault(if (jobState == JobState.COMPLETE) DownloadState.COMPLETED else if (jobState == JobState.FAILED) DownloadState.FAILED else DownloadState.QUEUED)
+            DownloadProgress(
+                downloadId = record.downloadId ?: record.id,
+                modelId = record.modelId ?: record.id,
+                repositoryId = record.repositoryId,
+                filename = record.filename ?: record.label,
+                state = state,
+                bytesDownloaded = record.bytesDownloaded,
+                totalBytes = record.totalBytes,
+                progressPercent = record.totalBytes?.takeIf { it > 0L }?.let { (record.bytesDownloaded * 100L / it).toInt().coerceIn(0, 100) },
+                downloadSpeedBytesPerSecond = record.speedBytesPerSecond,
+                elapsedTimeMillis = record.elapsedTimeMillis,
+                estimatedRemainingTimeMillis = record.estimatedRemainingTimeMillis,
+                startedAt = record.startedAt,
+                updatedAt = record.updatedAt,
+                retryCount = record.retryCount,
+                errorMessage = record.errorMessage,
+                isResumable = state == DownloadState.PAUSED || state == DownloadState.FAILED || state == DownloadState.RETRYING,
+                isPausable = state == DownloadState.DOWNLOADING,
+                isCancellable = state in setOf(DownloadState.QUEUED, DownloadState.STARTING, DownloadState.DOWNLOADING, DownloadState.PAUSED, DownloadState.RETRYING),
+            )
+        } else null
+        return DoraJob(
+            id = record.id,
+            kind = kind,
+            label = record.label,
+            state = jobState,
+            progress = record.progress,
+            message = record.message,
+            download = download,
+        )
+    }
 
     fun selectTab(tab: Int) = _uiState.update { it.copy(selectedTab = tab, toastMessage = null) }
+
+    fun toggleDownloadDetails(downloadId: String) = _uiState.update { state ->
+        state.copy(expandedDownloadId = if (state.expandedDownloadId == downloadId) null else downloadId)
+    }
+
+    private fun storageSummary(): DoraStorageSummary {
+        val modelsDirectory = File(getApplication<Application>().filesDir, "models")
+        val files = modelsDirectory.listFiles().orEmpty()
+        val modelBytes = files.filter { it.extension.equals("gguf", ignoreCase = true) }.sumOf { it.length() }
+        val temporaryBytes = files.filter { it.extension.equals("part", ignoreCase = true) }.sumOf { it.length() }
+        val orphanCount = files.count { it.extension.equals("gguf", ignoreCase = true) && registry.artifactForPath(it.absolutePath) == null }
+        val stat = android.os.StatFs(getApplication<Application>().filesDir.path)
+        return DoraStorageSummary(
+            totalBytes = stat.totalBytes,
+            availableBytes = stat.availableBytes,
+            modelBytes = modelBytes,
+            temporaryDownloadBytes = temporaryBytes,
+            orphanedFileCount = orphanCount,
+        )
+    }
 
     fun setComposerText(value: String) = _uiState.update { it.copy(composerText = value) }
 
@@ -210,8 +308,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(toastMessage = file.deviceFit.explanation) }
             return
         }
+        val requiredBytes = file.sizeBytes + maxOf(512L * 1024L * 1024L, file.sizeBytes / 10L)
+        if (deviceProfile.availableStorageBytes < requiredBytes) {
+            _uiState.update { it.copy(toastMessage = "Not enough private storage. Required ${formatBytes(requiredBytes)}; available ${formatBytes(deviceProfile.availableStorageBytes)}.") }
+            return
+        }
         if (_uiState.value.activeDownloadId != null) return
         val modelId = "hf-${file.repoId}-${file.filename}".replace(Regex("[^A-Za-z0-9._-]"), "_")
+        if (_uiState.value.jobs.any { it.download?.modelId == modelId && it.download?.state in setOf(DownloadState.QUEUED, DownloadState.STARTING, DownloadState.DOWNLOADING, DownloadState.PAUSED, DownloadState.RETRYING, DownloadState.VERIFYING, DownloadState.VALIDATING, DownloadState.INSTALLING) }) {
+            _uiState.update { it.copy(toastMessage = "This model is already in Dora’s download center.") }
+            return
+        }
         val model = LocalModel(
             id = modelId,
             name = file.filename,
@@ -226,7 +333,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             verified = false,
             recommended = file.deviceFit.level == DeviceFitLevel.RECOMMENDED,
         )
-        val job = DoraJob(kind = JobKind.DOWNLOAD, label = file.filename, state = JobState.RUNNING, message = "Queued for secure download")
+        val jobId = DoraModelDownloadWorker.jobId()
+        val job = DoraJob(
+            id = jobId,
+            kind = JobKind.DOWNLOAD,
+            label = file.filename,
+            state = JobState.RUNNING,
+            message = "Queued for secure download",
+            download = DownloadProgress(
+                downloadId = jobId,
+                modelId = modelId,
+                repositoryId = file.repoId,
+                filename = file.filename,
+                state = DownloadState.QUEUED,
+                bytesDownloaded = 0L,
+                totalBytes = file.sizeBytes,
+                progressPercent = 0,
+                downloadSpeedBytesPerSecond = null,
+                elapsedTimeMillis = 0L,
+                estimatedRemainingTimeMillis = null,
+                startedAt = null,
+                updatedAt = System.currentTimeMillis(),
+                retryCount = 0,
+                errorMessage = null,
+                isResumable = false,
+                isPausable = false,
+                isCancellable = true,
+            ),
+        )
         _uiState.update { it.copy(jobs = it.jobs + job, activeDownloadId = modelId, toastMessage = null) }
         val request = OneTimeWorkRequestBuilder<DoraModelDownloadWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
@@ -251,16 +385,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             workManager.getWorkInfoByIdFlow(request.id).collect { info ->
                 info ?: return@collect
                 val progress = info.progress.getFloat(DoraModelDownloadWorker.KEY_PROGRESS, 0f)
-                val message = info.progress.getLong(DoraModelDownloadWorker.KEY_BYTES_DOWNLOADED, 0L).takeIf { it > 0L }?.let { "Downloading ${formatBytes(it)}" } ?: "Queued for secure download"
+                val bytes = info.progress.getLong(DoraModelDownloadWorker.KEY_BYTES_DOWNLOADED, 0L)
+                val speed = info.progress.getLong(DoraModelDownloadWorker.KEY_SPEED_BYTES_PER_SECOND, -1L).takeIf { it > 0L }
+                val eta = info.progress.getLong(DoraModelDownloadWorker.KEY_ETA_MILLIS, -1L).takeIf { it > 0L }
+                val liveState = info.progress.getString(DoraModelDownloadWorker.KEY_DOWNLOAD_STATE)?.let { runCatching { DownloadState.valueOf(it) }.getOrNull() }
+                val message = bytes.takeIf { it > 0L }?.let { "Downloading ${formatBytes(it)}" } ?: "Queued for secure download"
                 when {
-                    info.state == WorkInfo.State.ENQUEUED -> updateDownloadJob(job.id, progress, "Queued or waiting for network")
-                    info.state == WorkInfo.State.RUNNING -> updateDownloadJob(job.id, progress, message)
+                    info.state == WorkInfo.State.ENQUEUED -> updateDownloadJob(job.id, progress, "Queued or waiting for network", downloadState = DownloadState.QUEUED, bytes = bytes, speed = speed, eta = eta)
+                    info.state == WorkInfo.State.RUNNING -> updateDownloadJob(job.id, progress, message, downloadState = liveState, bytes = bytes, speed = speed, eta = eta)
                     info.state == WorkInfo.State.SUCCEEDED -> {
                         val artifact = registry.artifact(modelId)
                         val installed = artifact?.let { model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = true, filePath = it.path) }
                         if (installed != null) {
                             _uiState.update { state -> state.copy(models = state.models.filterNot { it.id == modelId } + installed, activeDownloadId = null, toastMessage = "Model ready: ${file.filename}") }
-                            updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE)
+                            updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE, DownloadState.COMPLETED, bytes = artifact?.sizeBytes ?: 0L)
                         } else {
                             _uiState.update { it.copy(activeDownloadId = null, toastMessage = "Download completed but Dora could not restore the model record") }
                             updateDownloadJob(job.id, 0f, "Model record missing after download", JobState.FAILED)
@@ -268,7 +406,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     info.state.isFinished -> {
                         val error = info.outputData.getString(DoraModelDownloadWorker.KEY_ERROR) ?: "Model download failed"
-                        updateDownloadJob(job.id, progress, error, JobState.FAILED)
+                        updateDownloadJob(job.id, progress, error, JobState.FAILED, DownloadState.FAILED, bytes = bytes)
                         _uiState.update { it.copy(activeDownloadId = null, toastMessage = error) }
                     }
                 }
@@ -276,8 +414,120 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun updateDownloadJob(id: String, progress: Float, message: String, state: JobState = JobState.RUNNING) {
-        _uiState.update { current -> current.copy(jobs = current.jobs.map { job -> if (job.id == id) job.copy(progress = progress, message = message, state = state) else job }) }
+    private fun updateDownloadJob(
+        id: String,
+        progress: Float,
+        message: String,
+        state: JobState = JobState.RUNNING,
+        downloadState: DownloadState? = null,
+        bytes: Long? = null,
+        speed: Long? = null,
+        eta: Long? = null,
+    ) {
+        _uiState.update { current ->
+            current.copy(jobs = current.jobs.map { job ->
+                if (job.id != id) job else job.copy(
+                    progress = progress,
+                    message = message,
+                    state = state,
+                    download = job.download?.copy(
+                        state = downloadState ?: job.download.state,
+                        bytesDownloaded = bytes ?: job.download.bytesDownloaded,
+                        progressPercent = (progress * 100f).toInt().coerceIn(0, 100),
+                        downloadSpeedBytesPerSecond = speed ?: job.download.downloadSpeedBytesPerSecond,
+                        estimatedRemainingTimeMillis = eta ?: job.download.estimatedRemainingTimeMillis,
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+                )
+            })
+        }
+    }
+
+    fun pauseDownload(downloadId: String) {
+        val job = _uiState.value.jobs.firstOrNull { it.id == downloadId } ?: return
+        val download = job.download ?: return
+        if (!download.isPausable) return
+        downloadControls.requestPause(download.downloadId)
+        workManager.cancelUniqueWork("download-${download.modelId}")
+        _uiState.update { state -> state.copy(toastMessage = "Pausing ${download.filename}…") }
+    }
+
+    fun cancelDownload(downloadId: String) {
+        val job = _uiState.value.jobs.firstOrNull { it.id == downloadId } ?: return
+        val download = job.download ?: return
+        if (!download.isCancellable) return
+        downloadControls.requestCancel(download.downloadId)
+        workManager.cancelUniqueWork("download-${download.modelId}")
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.findJob(download.downloadId)?.let { record ->
+                dao.upsertJob(record.copy(
+                    state = JobState.CANCELED.name,
+                    message = "Download cancelled",
+                    downloadState = DownloadState.CANCELLED.name,
+                    errorMessage = null,
+                    updatedAt = System.currentTimeMillis(),
+                ))
+            }
+        }
+    }
+
+    fun resumeDownload(downloadId: String) = requeueDownload(downloadId, "Resuming download")
+
+    fun retryDownload(downloadId: String) = requeueDownload(downloadId, "Retrying download")
+
+    fun deleteDownload(downloadId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val record = dao.findJob(downloadId) ?: return@launch
+            downloadControls.requestCancel(record.downloadId ?: record.id)
+            record.modelId?.let { workManager.cancelUniqueWork("download-$it") }
+            record.temporaryPath?.let(::deletePrivateDownloadFile)
+            dao.deleteJob(record.id)
+        }
+    }
+
+    private fun requeueDownload(downloadId: String, message: String) {
+        viewModelScope.launch {
+            val record = withContext(Dispatchers.IO) { dao.findJob(downloadId) } ?: return@launch
+            val modelId = record.modelId ?: return@launch
+            val url = record.url ?: return@launch
+            downloadControls.clear(record.downloadId ?: record.id)
+            val queued = record.copy(
+                state = JobState.RUNNING.name,
+                message = message,
+                downloadState = DownloadState.QUEUED.name,
+                errorMessage = null,
+                updatedAt = System.currentTimeMillis(),
+            )
+            withContext(Dispatchers.IO) { dao.upsertJob(queued) }
+            workManager.enqueueUniqueWork("download-$modelId", ExistingWorkPolicy.REPLACE, downloadRequest(queued, url))
+        }
+    }
+
+    private fun downloadRequest(record: JobRecord, url: String): androidx.work.OneTimeWorkRequest = OneTimeWorkRequestBuilder<DoraModelDownloadWorker>()
+        .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+        .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 15L, TimeUnit.SECONDS)
+        .setInputData(
+            Data.Builder()
+                .putString(DoraModelDownloadWorker.KEY_JOB_ID, record.downloadId ?: record.id)
+                .putString(DoraModelDownloadWorker.KEY_MODEL_ID, record.modelId ?: record.id)
+                .putString(DoraModelDownloadWorker.KEY_MODEL_NAME, record.label)
+                .putString(DoraModelDownloadWorker.KEY_URL, url)
+                .putString(DoraModelDownloadWorker.KEY_SHA256, record.expectedSha256.orEmpty())
+                .putLong(DoraModelDownloadWorker.KEY_BYTES, record.totalBytes ?: -1L)
+                .putString(DoraModelDownloadWorker.KEY_SOURCE_REPO, record.repositoryId)
+                .putString(DoraModelDownloadWorker.KEY_SOURCE_FILENAME, record.filename)
+                .putString(DoraModelDownloadWorker.KEY_SOURCE_REVISION, record.sourceRevision)
+                .putString(DoraModelDownloadWorker.KEY_SOURCE_LICENSE, record.sourceLicense)
+                .build(),
+        )
+        .build()
+
+    private fun deletePrivateDownloadFile(path: String) {
+        runCatching {
+            val file = File(path).canonicalFile
+            val directory = File(getApplication<Application>().filesDir, "models").canonicalFile
+            if (file.parentFile?.canonicalFile == directory && file.extension.equals("part", ignoreCase = true)) file.delete()
+        }
     }
 
     fun toggleOfflineOnly() {

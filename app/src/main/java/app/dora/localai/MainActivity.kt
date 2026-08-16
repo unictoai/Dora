@@ -33,6 +33,13 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Storage
@@ -65,15 +72,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.dora.localai.data.DoraStorageSummary
 import app.dora.localai.data.DoraUiState
 import app.dora.localai.data.MainViewModel
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.DoraJob
 import app.dora.localai.domain.JobKind
 import app.dora.localai.domain.JobState
@@ -294,9 +305,16 @@ private fun MessageBubble(message: ChatMessage) {
 @Composable
 private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit) {
     val models = state.models.filter { it.kind == ModelKind.TEXT }
-    val downloadJob = state.jobs.lastOrNull { it.kind == JobKind.DOWNLOAD && it.state == JobState.RUNNING }
+    val downloadJobs = state.jobs.filter { it.kind == JobKind.DOWNLOAD }
+    val sections = listOf(
+        "ACTIVE" to downloadJobs.filter { it.download?.state in setOf(DownloadState.STARTING, DownloadState.DOWNLOADING, DownloadState.VERIFYING, DownloadState.VALIDATING, DownloadState.INSTALLING, DownloadState.RETRYING) },
+        "QUEUED" to downloadJobs.filter { it.download?.state == DownloadState.QUEUED },
+        "PAUSED" to downloadJobs.filter { it.download?.state == DownloadState.PAUSED },
+        "FAILED" to downloadJobs.filter { it.download?.state == DownloadState.FAILED },
+        "COMPLETED" to downloadJobs.filter { it.download?.state == DownloadState.COMPLETED || it.state == JobState.COMPLETE },
+    )
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
-        ScreenHeader("Models", "Import files or find a public GGUF on Hugging Face.")
+        ScreenHeader("Models", "Discover, download, verify, and run private GGUF models.")
         Spacer(Modifier.height(14.dp))
         OutlinedTextField(
             value = state.huggingFaceQuery,
@@ -323,7 +341,24 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 18.dp, bottom = 24.dp),
         ) {
-            downloadJob?.let { job -> item { DownloadStatusCard(job) } }
+            item { DownloadCenterSummary(state, downloadJobs) }
+            sections.forEach { (title, jobs) ->
+                if (jobs.isNotEmpty()) {
+                    item { Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp)) }
+                    items(jobs, key = { it.id }) { job ->
+                        DownloadProgressCard(
+                            job = job,
+                            expanded = state.expandedDownloadId == job.id,
+                            onToggleDetails = { vm.toggleDownloadDetails(job.id) },
+                            onPause = { vm.pauseDownload(job.id) },
+                            onResume = { vm.resumeDownload(job.id) },
+                            onRetry = { vm.retryDownload(job.id) },
+                            onCancel = { vm.cancelDownload(job.id) },
+                            onDelete = { vm.deleteDownload(job.id) },
+                        )
+                    }
+                }
+            }
             item { Text("On this device", style = MaterialTheme.typography.titleMedium) }
             items(models, key = { it.id }) { model -> ModelCard(model, vm) }
             if (state.huggingFaceCandidates.isNotEmpty()) {
@@ -331,7 +366,7 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
                 items(state.huggingFaceCandidates, key = { it.repoId }) { candidate -> HuggingFaceCandidateCard(candidate, vm, state.activeDownloadId) }
             } else {
                 item {
-                    Text("Search Hugging Face for public GGUF files. Dora ranks quantizations by your measured RAM, storage, and ARM64 support.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Search Hugging Face for public GGUF files. Dora ranks quantizations by measured RAM, storage, and ARM64 support.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -339,14 +374,113 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
 }
 
 @Composable
-private fun DownloadStatusCard(job: DoraJob) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+private fun DownloadCenterSummary(state: DoraUiState, jobs: List<DoraJob>) {
+    val active = jobs.count { it.download?.state in setOf(DownloadState.STARTING, DownloadState.DOWNLOADING, DownloadState.VERIFYING, DownloadState.VALIDATING, DownloadState.INSTALLING, DownloadState.RETRYING) }
+    val paused = jobs.count { it.download?.state == DownloadState.PAUSED }
+    val failed = jobs.count { it.download?.state == DownloadState.FAILED }
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Downloading ${job.label}", style = MaterialTheme.typography.titleSmall)
-            Text(job.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
-            LinearProgressIndicator(progress = { job.progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+            Text("Download Center", style = MaterialTheme.typography.titleMedium)
+            Text("$active active • ${jobs.count { it.download?.state == DownloadState.QUEUED }} queued • $paused paused • $failed failed", style = MaterialTheme.typography.bodySmall)
+            Text("${formatBytesForUi(state.storageSummary.availableBytes)} available • ${formatBytesForUi(state.storageSummary.modelBytes)} in Dora models • ${state.storageSummary.orphanedFileCount} orphaned files", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+@Composable
+private fun DownloadProgressCard(
+    job: DoraJob,
+    expanded: Boolean,
+    onToggleDetails: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val download = job.download ?: return
+    val percent = download.progressPercent?.coerceIn(0, 100)
+    val progress = (percent ?: 0) / 100f
+    val stateLabel = when (download.state) {
+        DownloadState.QUEUED -> "Queued"
+        DownloadState.STARTING -> "Starting"
+        DownloadState.DOWNLOADING -> "Downloading"
+        DownloadState.PAUSED -> "Paused"
+        DownloadState.VERIFYING -> "Verifying"
+        DownloadState.VALIDATING -> "Validating"
+        DownloadState.INSTALLING -> "Installing"
+        DownloadState.COMPLETED -> "Ready"
+        DownloadState.CANCELLING -> "Cancelling"
+        DownloadState.CANCELLED -> "Cancelled"
+        DownloadState.FAILED -> "Failed"
+        DownloadState.RETRYING -> "Retrying"
+    }
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = if (download.state == DownloadState.FAILED) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer)) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(download.filename, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(stateLabel, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                }
+                IconButton(onClick = onToggleDetails) {
+                    Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = if (expanded) "Hide download details" else "Show download details")
+                }
+            }
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().semantics { contentDescription = "${download.filename}: ${percent?.let { "$it percent" } ?: "progress calculating"}, state $stateLabel" },
+            )
+            Text(
+                buildString {
+                    append(percent?.let { "$it%" } ?: "Calculating…")
+                    append(" • ")
+                    append(download.totalBytes?.let { "${formatBytesForUi(download.bytesDownloaded)} / ${formatBytesForUi(it)}" } ?: "${formatBytesForUi(download.bytesDownloaded)} downloaded")
+                    download.downloadSpeedBytesPerSecond?.let { append(" • ${formatBytesForUi(it)}/s") }
+                    download.estimatedRemainingTimeMillis?.let { append(" • ~${formatDurationForUi(it)} remaining") }
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            if (!download.errorMessage.isNullOrBlank()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.width(6.dp))
+                    Text(download.errorMessage!!, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                when {
+                    download.state == DownloadState.DOWNLOADING || download.state == DownloadState.STARTING -> IconButton(onClick = onPause, enabled = download.isPausable) { Icon(Icons.Default.Pause, contentDescription = "Pause download") }
+                    download.state == DownloadState.PAUSED -> IconButton(onClick = onResume) { Icon(Icons.Default.PlayArrow, contentDescription = "Resume download") }
+                    download.state == DownloadState.FAILED -> IconButton(onClick = onRetry) { Icon(Icons.Default.Refresh, contentDescription = "Retry download") }
+                }
+                if (download.isCancellable) IconButton(onClick = onCancel) { Icon(Icons.Default.Close, contentDescription = "Cancel download") }
+                if (download.state == DownloadState.FAILED || download.state == DownloadState.CANCELLED) IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteOutline, contentDescription = "Delete failed download") }
+                TextButton(onClick = onToggleDetails) { Text(if (expanded) "Hide details" else "Details") }
+            }
+            if (expanded) {
+                HorizontalDivider()
+                DownloadDetailRow("Repository", download.repositoryId ?: "Not recorded")
+                DownloadDetailRow("File", download.filename)
+                DownloadDetailRow("Elapsed", formatDurationForUi(download.elapsedTimeMillis))
+                DownloadDetailRow("Retries", download.retryCount.toString())
+                DownloadDetailRow("Download ID", download.downloadId)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadDetailRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.End, modifier = Modifier.padding(start = 12.dp))
+    }
+}
+
+private fun formatDurationForUi(millis: Long): String {
+    val seconds = (millis / 1000L).coerceAtLeast(0L)
+    return if (seconds >= 60L) "${seconds / 60L} min" else "$seconds sec"
 }
 
 @Composable
@@ -405,18 +539,30 @@ private fun formatBytesForUi(bytes: Long): String = when {
 
 @Composable
 private fun ModelCard(model: LocalModel, vm: MainViewModel) {
-    val imported = model.filePath != null
+    val imported = model.installState == ModelInstallState.INSTALLED && model.filePath != null && model.verified
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.Top) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(model.name, style = MaterialTheme.typography.titleMedium)
-                    Text(if (imported) "Ready for local chat" else "No model file imported", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        when (model.installState) {
+                            ModelInstallState.INSTALLED -> "Ready for local chat"
+                            ModelInstallState.INVALID -> "Needs attention — integrity or file check failed"
+                            ModelInstallState.EXTERNAL -> "External model reference"
+                            ModelInstallState.AVAILABLE -> "Not installed"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (model.installState == ModelInstallState.INVALID) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 if (imported) Icon(Icons.Default.CheckCircle, contentDescription = "Ready", tint = Color(0xFF34A853))
+                if (model.installState == ModelInstallState.INVALID) Icon(Icons.Default.ErrorOutline, contentDescription = "Invalid model", tint = MaterialTheme.colorScheme.error)
             }
-            Text(if (imported) "${model.format} • ${model.sizeLabel}" else "Choose a .gguf file from your device to use this model.", style = MaterialTheme.typography.bodyMedium)
-            if (imported) {
+            Text("${model.publisher} • ${model.format} • ${model.sizeLabel}", style = MaterialTheme.typography.bodyMedium)
+            Text(model.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            Text("Device fit: ${model.memoryLabel} • License: ${model.license}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (model.filePath != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Active local model", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
                     IconButton(onClick = { vm.deleteModel(model.id) }) { Icon(Icons.Default.DeleteOutline, contentDescription = "Remove model") }
@@ -437,13 +583,17 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
         HorizontalDivider()
         SettingRow(Icons.Default.Memory, "Device", state.deviceSummary)
         HorizontalDivider()
-        SettingRow(Icons.Default.Storage, "Storage", "Imported models stay in Dora’s private app storage.")
+        SettingRow(
+            Icons.Default.Storage,
+            "Storage",
+            "${formatBytesForUi(state.storageSummary.availableBytes)} available of ${formatBytesForUi(state.storageSummary.totalBytes)} • ${formatBytesForUi(state.storageSummary.modelBytes)} models • ${formatBytesForUi(state.storageSummary.temporaryDownloadBytes)} temporary downloads • ${state.storageSummary.orphanedFileCount} orphaned files",
+        )
         HorizontalDivider()
         SettingRow(Icons.Default.Info, "Runtime", state.runtimeNotice)
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
         Spacer(Modifier.height(12.dp))
-        Text("Dora 0.3.1 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Text("Dora 0.4.1 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
 }
 

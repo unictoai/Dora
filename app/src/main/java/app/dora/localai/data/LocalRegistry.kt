@@ -51,6 +51,8 @@ class LocalRegistry(context: Context) {
 
     fun allArtifacts(): List<StoredArtifact> = installedModelIds().mapNotNull(::artifact)
 
+    fun artifactForPath(path: String): StoredArtifact? = allArtifacts().firstOrNull { it.path == path }
+
     fun invalidArtifactIds(): Set<String> = prefs.getStringSet(KEY_INVALID_ARTIFACTS, emptySet()).orEmpty()
 
     fun markArtifactInvalid(id: String) {
