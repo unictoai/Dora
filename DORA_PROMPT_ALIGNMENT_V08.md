@@ -57,3 +57,8 @@ The current milestone remains a pre-alpha release. Dora intentionally does not c
 ## v0.11 hardening evidence — 2026-08-21
 
 The hardening slice now refuses silent demo substitution in the user-facing native chat path, adds explicit regenerate and edit-and-regenerate actions, bounded JSON conversation import, persisted theme selection, notification permission UX, compatibility calculation details, device-local benchmark output, orphan cleanup, multi-model-safe import identities, model-operation concurrency guards, and confirmation dialogs for destructive actions. These changes improve capability honesty and recovery behavior without claiming image generation, voice, vision, cloud inference, plugins, MCP, or tool execution.
+
+
+## v0.12 candidate evidence — 2026-08-21
+
+Additional verified work includes copy/share actions for completed messages, named per-model generation profiles, Room model-manifest persistence, registry repair during reconciliation, destructive model/data confirmations, and minSdk-26-safe bounded import reading. The image-runtime research note documents an Android ARM64 build path for stable-diffusion.cpp but also records the missing cross-device embedding and acceptance evidence; Dora therefore keeps image generation gated instead of simulating it.

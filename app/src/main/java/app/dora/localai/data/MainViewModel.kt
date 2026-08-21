@@ -115,6 +115,7 @@ data class DoraUiState(
     val privacyIncognito: Boolean = false,
     val retentionDays: Int = 0,
     val conversationSettings: Map<String, GenerationSettings> = emptyMap(),
+    val savedProfiles: Map<String, Map<String, GenerationSettings>> = emptyMap(),
     val storageSummary: DoraStorageSummary = DoraStorageSummary(),
 )
 
@@ -195,6 +196,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
             nativeRuntimeVersion = runCatching { NativeLlamaEngine.version() }.getOrElse { "Unavailable" },
             deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
+            savedProfiles = allModels.associate { it.id to registry.generationProfiles(it.id) },
             storageSummary = storageSummary(),
         )
     }
@@ -462,6 +464,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun saveActiveModelProfile(name: String, settings: GenerationSettings) {
+        val modelId = _uiState.value.activeModelId ?: return
+        val cleanName = name.trim().take(40)
+        if (cleanName.isBlank()) return
+        val normalized = settings.normalized()
+        registry.saveGenerationProfile(modelId, cleanName, normalized)
+        _uiState.update { state ->
+            val profiles = state.savedProfiles[modelId].orEmpty() + (cleanName to normalized)
+            state.copy(savedProfiles = state.savedProfiles + (modelId to profiles), toastMessage = "Saved profile: $cleanName")
+        }
+    }
+
     fun updateGenerationSettings(settings: GenerationSettings) {
         val id = _uiState.value.activeConversationId
         val normalized = settings.normalized()
@@ -643,6 +657,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (installed != null) {
                             val metadata = withContext(Dispatchers.IO) { GgufMetadataReader.read(File(artifact.path)).getOrNull() }
                             val installedWithMetadata = installed.copy(metadata = metadata)
+                            persistModelRecord(installedWithMetadata, artifact)
                             if (_uiState.value.activeModelId == null) registry.setActiveModelId(modelId)
                             _uiState.update { state -> state.copy(models = state.models.filterNot { it.id == modelId } + installedWithMetadata, activeModelId = state.activeModelId ?: modelId, activeDownloadId = null, toastMessage = "Model ready: ${file.filename}") }
                             updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE, DownloadState.COMPLETED, bytes = artifact?.sizeBytes ?: 0L)
@@ -859,6 +874,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             modelStore.clearPrivateArtifacts()
             dao.deleteAllMessages()
             dao.deleteAllConversations()
+            dao.deleteAllModels()
             dao.deleteAllJobs()
             dao.deleteAllDocumentChunks()
             dao.deleteAllDocuments()
@@ -1017,6 +1033,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 filePath = artifact.path,
                 metadata = artifact.metadata,
             )
+            persistModelRecord(importedModel, LocalRegistry.StoredArtifact(artifact.id, importedModel.name, artifact.path, artifact.sizeBytes, artifact.sha256))
             _uiState.update { state ->
                 state.copy(models = state.models.filterNot { it.id == artifact.id } + importedModel, activeModelId = artifact.id, toastMessage = "Model ready: ${importedModel.name}")
             }
@@ -1043,6 +1060,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         modelStore.delete(_uiState.value.models.firstOrNull { it.id == modelId }?.filePath)
         if (registry.activeModelId() == modelId) registry.setActiveModelId(null)
         registry.setModelInstalled(modelId, false)
+        viewModelScope.launch(Dispatchers.IO) { dao.deleteModel(modelId) }
         _uiState.update { state ->
                             state.copy(models = state.models.map { model ->
                     if (model.id == modelId) model.copy(installState = app.dora.localai.domain.ModelInstallState.AVAILABLE, filePath = null, verified = false) else model
@@ -1295,6 +1313,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         bytes >= 1024 * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
         bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
         else -> "%.1f KB".format(bytes / 1024.0)
+    }
+
+    private fun persistModelRecord(model: LocalModel, artifact: LocalRegistry.StoredArtifact) {
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.upsertModel(
+                ModelRecord(
+                    id = model.id,
+                    name = model.name,
+                    kind = model.kind.name,
+                    format = model.format,
+                    path = artifact.path,
+                    sizeBytes = artifact.sizeBytes,
+                    sha256 = artifact.sha256,
+                    license = artifact.sourceLicense ?: model.license,
+                    verified = model.verified,
+                    updatedAt = System.currentTimeMillis(),
+                    sourceRepo = artifact.sourceRepo,
+                    sourceFilename = artifact.sourceFilename,
+                    sourceRevision = artifact.sourceRevision,
+                    sourceUrl = artifact.sourceUrl,
+                    sourceLicense = artifact.sourceLicense,
+                ),
+            )
+        }
     }
 
     private fun updateLastAssistant(id: String, text: String, partial: Boolean, metrics: InferenceMetrics? = null) {

@@ -1,6 +1,7 @@
 package app.dora.localai
 
 import android.Manifest
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -85,6 +86,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -143,6 +146,10 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
 @Composable
 private fun DoraAppBody(state: DoraUiState, vm: MainViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+    val shareText: (String) -> Unit = { text ->
+        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text) }, "Share from Dora"))
+    }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::importGguf)
     }
@@ -198,6 +205,7 @@ private fun DoraAppBody(state: DoraUiState, vm: MainViewModel) {
                     onImportModel = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
                     onImportDocument = { documentLauncher.launch(arrayOf("text/plain", "text/markdown", "text/csv", "application/json", "application/xml")) },
                     onImportConversation = { importConversationLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
+                    onShareMessage = shareText,
                     onExportMarkdown = {
                         val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
                             .replace(Regex("[^A-Za-z0-9._-]+"), "_")
@@ -275,10 +283,11 @@ private fun SetupPoint(title: String, description: String) {
 }
 
 @Composable
-private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onImportConversation: () -> Unit, onExportMarkdown: () -> Unit, onExportJson: () -> Unit) {
+private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onImportConversation: () -> Unit, onShareMessage: (String) -> Unit, onExportMarkdown: () -> Unit, onExportJson: () -> Unit) {
     val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: state.conversations.first()
     val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == ModelKind.TEXT && it.filePath != null && it.verified }
     val contextEstimate = conversation.messages.sumOf { estimateTokensForUi(it.text) }
+    val clipboard = LocalClipboardManager.current
     var showSettings by remember { mutableStateOf(false) }
     var showExportOptions by remember { mutableStateOf(false) }
     var renameConversationId by remember { mutableStateOf<String?>(null) }
@@ -353,6 +362,8 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
                 canEdit = lastUserPrompt != null,
                 onRegenerate = vm::regenerateLastAssistant,
                 onEdit = { editPromptText = lastUserPrompt.orEmpty(); showEditPrompt = true },
+                onCopy = { text -> clipboard.setText(AnnotatedString(text)) },
+                onShare = onShareMessage,
             )
         }
         Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
@@ -389,8 +400,10 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
     if (showSettings) {
         GenerationSettingsDialog(
             settings = state.activeChatSettingsForUi(),
+            savedProfiles = state.savedProfiles[state.activeModelId].orEmpty(),
             onDismiss = { showSettings = false },
             onSave = { vm.updateGenerationSettings(it); showSettings = false },
+            onSaveProfile = vm::saveActiveModelProfile,
         )
     }
     renameConversationId?.let { id ->
@@ -547,10 +560,13 @@ private fun RenameConversationDialog(initialTitle: String, onDismiss: () -> Unit
 @Composable
 private fun GenerationSettingsDialog(
     settings: app.dora.localai.domain.GenerationSettings,
+    savedProfiles: Map<String, app.dora.localai.domain.GenerationSettings>,
     onDismiss: () -> Unit,
     onSave: (app.dora.localai.domain.GenerationSettings) -> Unit,
+    onSaveProfile: (String, app.dora.localai.domain.GenerationSettings) -> Unit,
 ) {
     var draft by remember(settings) { mutableStateOf(settings) }
+    var profileName by remember { mutableStateOf("") }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Local generation") },
@@ -566,6 +582,18 @@ private fun GenerationSettingsDialog(
                     ).forEach { (label, profile) ->
                         FilterChip(selected = false, onClick = { draft = profile.normalized() }, label = { Text(label) })
                     }
+                }
+                if (savedProfiles.isNotEmpty()) {
+                    Text("Saved profiles for this model", style = MaterialTheme.typography.labelMedium)
+                    Row(modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        savedProfiles.forEach { (name, profile) ->
+                            FilterChip(selected = false, onClick = { draft = profile }, label = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = profileName, onValueChange = { profileName = it.take(40) }, modifier = Modifier.weight(1f), singleLine = true, label = { Text("Save current as") })
+                    TextButton(onClick = { onSaveProfile(profileName, draft); profileName = "" }, enabled = profileName.trim().isNotEmpty()) { Text("Save") }
                 }
                 Text("Prompt templates", style = MaterialTheme.typography.labelMedium)
                 Row(modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -616,6 +644,8 @@ private fun ChatHistory(
     canEdit: Boolean = false,
     onRegenerate: () -> Unit = {},
     onEdit: () -> Unit = {},
+    onCopy: (String) -> Unit = {},
+    onShare: (String) -> Unit = {},
 ) {
     if (messages.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
@@ -635,13 +665,15 @@ private fun ChatHistory(
                 canEdit = canEdit,
                 onRegenerate = onRegenerate,
                 onEdit = onEdit,
+                onCopy = { onCopy(message.text) },
+                onShare = { onShare(message.text) },
             )
         }
     }
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, showActions: Boolean = false, canEdit: Boolean = false, onRegenerate: () -> Unit = {}, onEdit: () -> Unit = {}) {
+private fun MessageBubble(message: ChatMessage, showActions: Boolean = false, canEdit: Boolean = false, onRegenerate: () -> Unit = {}, onEdit: () -> Unit = {}, onCopy: () -> Unit = {}, onShare: () -> Unit = {}) {
     val isUser = message.role == MessageRole.USER
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Column(modifier = Modifier.fillMaxWidth(if (isUser) 0.84f else 0.94f)) {
@@ -660,10 +692,12 @@ private fun MessageBubble(message: ChatMessage, showActions: Boolean = false, ca
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (showActions) {
+                if (!message.isPartial) {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = onRegenerate) { Text("Regenerate") }
-                        if (canEdit) TextButton(onClick = onEdit) { Text("Edit prompt") }
+                        TextButton(onClick = onCopy) { Text("Copy") }
+                        TextButton(onClick = onShare) { Text("Share") }
+                        if (showActions) TextButton(onClick = onRegenerate) { Text("Regenerate") }
+                        if (showActions && canEdit) TextButton(onClick = onEdit) { Text("Edit prompt") }
                     }
                 }
             }

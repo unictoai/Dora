@@ -116,3 +116,10 @@ The release remains **not beta-ready**. A physical ARM64 device is still require
 The next slice extends Dora’s real local-text workflow without introducing simulated capabilities. Chat generation now refuses to substitute the deterministic demo engine when a verified model or native llama.cpp runtime is unavailable. The latest assistant response can be regenerated, and the latest user prompt can be edited and regenerated through explicit UI actions. Conversations can round-trip through bounded JSON import and Markdown/JSON export, including normalized metrics when available.
 
 The slice also adds persisted System/Light/Dark theme selection, Android notification-permission request UX for long downloads, compatibility explanations showing the actual model-size, storage, RAM, and ABI inputs, real device-local benchmark output, orphaned private-file cleanup, multi-model-safe manual import identities, duplicate-install detection, model-operation guards during inference, and confirmation dialogs for destructive model/data removal. These capabilities remain subject to physical-device and instrumentation verification.
+
+
+## v0.12.0-prealpha candidate — 2026-08-21
+
+The next candidate slice adds explicit copy and Android share actions to completed messages, named per-model generation profiles persisted through LocalRegistry, Room model-manifest persistence for imports and downloads, startup repair of missing registry artifacts and verification state, real compatibility breakdowns, and additional safeguards around model lifecycle actions. A research note records why image generation remains gated behind a real Android-compatible backend and device validation rather than a simulated adapter.
+
+The candidate also hardens bounded conversation import for minSdk 26, adds destructive-action confirmations, local benchmark reporting, appearance controls, orphan-file cleanup, and prevents silent demo output when production native inference is unavailable. The repository remains pre-alpha until physical ARM64 acceptance testing is completed.

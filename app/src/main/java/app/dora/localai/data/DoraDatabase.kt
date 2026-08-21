@@ -123,6 +123,9 @@ interface DoraDao {
     @Query("DELETE FROM model_records WHERE id = :id")
     suspend fun deleteModel(id: String)
 
+    @Query("DELETE FROM model_records")
+    suspend fun deleteAllModels()
+
     @Query("SELECT * FROM model_records WHERE id = :id LIMIT 1")
     suspend fun findModel(id: String): ModelRecord?
 

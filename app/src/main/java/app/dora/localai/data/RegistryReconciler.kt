@@ -69,11 +69,31 @@ class RegistryReconciler(
                     ),
                 )
                 messages += "${artifact.name}: restored missing database record"
+            } else if (!roomRecord.verified) {
+                dao.upsertModel(roomRecord.copy(verified = true, updatedAt = System.currentTimeMillis()))
+                messages += "${artifact.name}: verification state repaired"
             }
         }
 
         for (record in roomModels.values) {
             val file = record.path?.let(::File)
+            if (isPrivateModelFile(file) && file?.exists() == true && registry.artifact(record.id) == null) {
+                registry.setArtifact(
+                    LocalRegistry.StoredArtifact(
+                        id = record.id,
+                        name = record.name,
+                        path = record.path,
+                        sizeBytes = record.sizeBytes,
+                        sha256 = record.sha256,
+                        sourceRepo = record.sourceRepo,
+                        sourceFilename = record.sourceFilename,
+                        sourceRevision = record.sourceRevision,
+                        sourceUrl = record.sourceUrl,
+                        sourceLicense = record.sourceLicense,
+                    ),
+                )
+                messages += "${record.name}: restored missing registry artifact"
+            }
             if (record.path != null && (!isPrivateModelFile(file) || file?.exists() != true)) {
                 registry.markArtifactInvalid(record.id)
                 invalid += 1

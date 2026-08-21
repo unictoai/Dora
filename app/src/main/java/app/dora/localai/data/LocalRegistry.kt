@@ -1,6 +1,7 @@
 package app.dora.localai.data
 
 import android.content.Context
+import app.dora.localai.domain.GenerationSettings
 
 class LocalRegistry(context: Context) {
     private val prefs = context.getSharedPreferences("dora_registry", Context.MODE_PRIVATE)
@@ -37,6 +38,39 @@ class LocalRegistry(context: Context) {
     fun setThemeMode(value: String) {
         prefs.edit().putString(KEY_THEME_MODE, value.uppercase().takeIf { it in setOf("SYSTEM", "LIGHT", "DARK") } ?: "SYSTEM").apply()
     }
+
+    fun saveGenerationProfile(modelId: String, name: String, settings: GenerationSettings) {
+        val cleanName = name.trim().take(40)
+        if (modelId.isBlank() || cleanName.isBlank()) return
+        val normalized = settings.normalized()
+        val value = org.json.JSONObject()
+            .put("systemPrompt", normalized.systemPrompt)
+            .put("maxTokens", normalized.maxTokens)
+            .put("threads", normalized.threads)
+            .put("temperature", normalized.temperature.toDouble())
+            .put("topK", normalized.topK)
+            .put("topP", normalized.topP.toDouble())
+            .toString()
+        prefs.edit().putString(profileKey(modelId, cleanName), value).apply()
+    }
+
+    fun generationProfiles(modelId: String): Map<String, GenerationSettings> = prefs.all
+        .filterKeys { it.startsWith(profilePrefix(modelId)) }
+        .mapNotNull { (key, value) ->
+            val name = key.removePrefix(profilePrefix(modelId))
+            val encoded = value as? String ?: return@mapNotNull null
+            runCatching {
+                name to GenerationSettings(
+                    systemPrompt = org.json.JSONObject(encoded).optString("systemPrompt"),
+                    maxTokens = org.json.JSONObject(encoded).optInt("maxTokens", 256),
+                    threads = org.json.JSONObject(encoded).optInt("threads", 4),
+                    temperature = org.json.JSONObject(encoded).optDouble("temperature", 0.7).toFloat(),
+                    topK = org.json.JSONObject(encoded).optInt("topK", 40),
+                    topP = org.json.JSONObject(encoded).optDouble("topP", 0.95).toFloat(),
+                ).normalized()
+            }.getOrNull()
+        }
+        .toMap()
 
     fun setRetentionDays(value: Int) {
         prefs.edit().putInt(KEY_RETENTION_DAYS, value.coerceIn(0, 365)).apply()
@@ -108,6 +142,8 @@ class LocalRegistry(context: Context) {
     }
 
     private fun artifactKey(id: String, field: String) = "artifact_${id}_$field"
+    private fun profilePrefix(modelId: String) = "profile_${modelId}_"
+    private fun profileKey(modelId: String, name: String) = profilePrefix(modelId) + name
 
     private companion object {
         const val KEY_OFFLINE_ONLY = "offline_only"
