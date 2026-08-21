@@ -98,7 +98,7 @@ Startup recovery now re-enqueues interrupted download, verification, validation,
 The remaining release-blocking gaps are honest limitations rather than hidden claims. The repository still needs Android integration/failure-injection coverage for HTTP 200/206, redirects, timeouts, network loss, disk exhaustion, pause/resume, process death, duplicate taps, and concurrent delete/import. A physical ARM64 device run is required for notification behavior, native model loading, cancellation, thermal/memory behavior, offline chat, and the complete acceptance workflow. Queue reordering, configurable concurrency, richer metadata fields, persistent conversations, and a native persistent session manager remain follow-up milestones.
 
 
-## v0.9.0-prealpha implementation evidence — 2026-08-21
+## v0.10.0-prealpha implementation evidence — 2026-08-21
 
 Dora 0.9.0-prealpha extends the existing architecture rather than replacing it. The milestone adds normalized inference telemetry, Markdown and fenced-code chat rendering, configurable incognito and retention controls, portable Markdown/JSON conversation export, title-and-message conversation search, bounded GGUF scalar metadata parsing, model-detail dialogs, context-token estimates, runtime diagnostics, generation profiles, and prompt templates for coding, writing, and Q&A. Room version 6 persists the five inference-metric columns, and the committed schema fixture plus CI guard now target version 6.
 

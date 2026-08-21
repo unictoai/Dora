@@ -35,7 +35,7 @@ The following requirements remain explicitly future milestones: production seman
 
 A v0.8 release may claim implementation completion only for features covered by source-level tests, JVM tests, migration checks, lint, debug/release builds, APK signature verification, and ARM64 native packaging. A beta claim additionally requires a physical ARM64 device run covering model discovery, download/recovery, native load, generation cancellation, document import/retrieval, chat persistence, storage reconciliation, thermal behavior, notifications, and offline mode. A performance-superiority claim requires a reproducible benchmark matrix; it must not be inferred from a successful build.
 
-## v0.9 implementation evidence — 2026-08-21
+## v0.10 implementation evidence — 2026-08-21
 
 The following prompt-aligned capabilities are now implemented on top of the preserved Dora architecture:
 
