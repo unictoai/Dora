@@ -63,8 +63,8 @@ jobs:
 
       - name: Verify Room schema fixture is committed
         run: |
-          test -s app/schemas/app.dora.localai.data.DoraDatabase/4.json
-          git diff --exit-code -- app/schemas/app.dora.localai.data.DoraDatabase/4.json
+          test -s app/schemas/app.dora.localai.data.DoraDatabase/5.json
+          git diff --exit-code -- app/schemas/app.dora.localai.data.DoraDatabase/5.json
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

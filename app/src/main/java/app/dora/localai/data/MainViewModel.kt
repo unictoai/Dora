@@ -26,6 +26,7 @@ import app.dora.localai.domain.Conversation
 import app.dora.localai.domain.DoraJob
 import app.dora.localai.domain.JobKind
 import app.dora.localai.domain.JobState
+import app.dora.localai.domain.LocalDocument
 import app.dora.localai.domain.LocalModel
 import app.dora.localai.domain.MessageRole
 import app.dora.localai.engine.DoraDemoImageEngine
@@ -43,6 +44,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
+
+private const val MAX_DOCUMENT_CONTEXT_CHUNKS = 4
+private const val MAX_CONTEXT_CHARS_PER_CHUNK = 1_200
 
 private val starterTextModel = LocalModel(
     id = "dora-starter-gguf",
@@ -96,6 +100,9 @@ data class DoraUiState(
     val activeDownloadId: String? = null,
     val expandedDownloadId: String? = null,
     val showConversationList: Boolean = false,
+    val documents: List<LocalDocument> = emptyList(),
+    val documentSearchEnabled: Boolean = true,
+    val showDocumentPanel: Boolean = false,
     val conversationSettings: Map<String, GenerationSettings> = emptyMap(),
     val storageSummary: DoraStorageSummary = DoraStorageSummary(),
 )
@@ -120,6 +127,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val workManager = WorkManager.getInstance(application)
     private val downloadControls = DownloadControlStore(application)
     private val reconciler = RegistryReconciler(application, registry, dao)
+    private val documentRepository = LocalDocumentRepository(application, dao)
+    private var documentChunks: List<DocumentChunkRecord> = emptyList()
     private val textEngine = DoraDemoTextEngine()
     private val nativeTextEngine = NativeLlamaTextEngine()
     private val imageEngine = DoraDemoImageEngine()
@@ -177,6 +186,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val conversation = _uiState.value.conversations.first()
         _uiState.update { it.copy(activeConversationId = conversation.id) }
         viewModelScope.launch(Dispatchers.IO) { loadConversations() }
+        viewModelScope.launch(Dispatchers.IO) { loadDocuments() }
         viewModelScope.launch {
             dao.observeJobs().collect { records ->
                 _uiState.update { state -> state.copy(jobs = records.map(::toDoraJob)) }
@@ -202,6 +212,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { recoverInterruptedDownloads() }
         }
+    }
+
+    private suspend fun loadDocuments() {
+        val documents = documentRepository.allDocuments()
+        documentChunks = documentRepository.allChunks()
+        _uiState.update { it.copy(documents = documents) }
     }
 
     private suspend fun recoverInterruptedDownloads() {
@@ -335,6 +351,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleConversationList() = _uiState.update { it.copy(showConversationList = !it.showConversationList) }
+
+    fun toggleDocumentPanel() = _uiState.update { it.copy(showDocumentPanel = !it.showDocumentPanel) }
+
+    fun toggleDocumentSearch(enabled: Boolean) = _uiState.update { it.copy(documentSearchEnabled = enabled) }
+
+    fun importDocument(uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { documentRepository.import(uri) }
+            if (result.isSuccess) {
+                withContext(Dispatchers.IO) { loadDocuments() }
+                _uiState.update { it.copy(toastMessage = "Document indexed locally") }
+            } else {
+                _uiState.update { it.copy(toastMessage = result.exceptionOrNull()?.message ?: "Document indexing failed") }
+            }
+        }
+    }
+
+    fun deleteDocument(id: String) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { documentRepository.delete(id) }
+            if (result.isSuccess) {
+                withContext(Dispatchers.IO) { loadDocuments() }
+                _uiState.update { it.copy(toastMessage = "Document removed from local context") }
+            } else {
+                _uiState.update { it.copy(toastMessage = result.exceptionOrNull()?.message ?: "Document removal failed") }
+            }
+        }
+    }
 
     fun selectConversation(id: String) {
         if (_uiState.value.conversations.any { it.id == id }) {
@@ -826,7 +870,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val conversation = _uiState.value.conversations.first { it.id == conversationId }
                 val activeModel = _uiState.value.models.firstOrNull { it.id == _uiState.value.activeModelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null && it.verified }
                 val engine = if (activeModel != null && nativeTextEngine.isProductionReady) nativeTextEngine else textEngine
-                val history = if (settings.systemPrompt.isBlank()) conversation.messages else listOf(ChatMessage(role = MessageRole.SYSTEM, text = settings.systemPrompt)) + conversation.messages
+                val documentPrompt = if (_uiState.value.documentSearchEnabled) documentContext(prompt) else ""
+                val systemPrompt = listOf(settings.systemPrompt.takeIf { it.isNotBlank() }, documentPrompt.takeIf { it.isNotBlank() }).filterNotNull().joinToString("\n\n")
+                val history = if (systemPrompt.isBlank()) conversation.messages else listOf(ChatMessage(role = MessageRole.SYSTEM, text = systemPrompt)) + conversation.messages
                 var accumulated = ""
                 engine.streamReply(activeModel ?: starterTextModel, history, settings).collect { token ->
                     accumulated += token
@@ -842,6 +888,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(toastMessage = "Local generation failed") }
             } finally {
                 _uiState.update { it.copy(isGenerating = false) }
+            }
+        }
+    }
+
+    private fun documentContext(query: String): String {
+        val terms = query.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]+"), " ").split(" ").filter { it.length >= 3 }.toSet()
+        if (terms.isEmpty() || documentChunks.isEmpty()) return ""
+        val documentsById = _uiState.value.documents.associateBy { it.id }
+        val matches = documentChunks.asSequence()
+            .filter { chunk -> documentsById[chunk.documentId]?.enabled == true }
+            .map { chunk -> chunk to terms.count { term -> " $term " in " ${chunk.searchableText} " } }
+            .filter { it.second > 0 }
+            .sortedByDescending { it.second }
+            .take(MAX_DOCUMENT_CONTEXT_CHUNKS)
+            .toList()
+        if (matches.isEmpty()) return ""
+        return buildString {
+            append("Use these excerpts from the user’s local documents when relevant. If they do not answer the question, say so. Do not invent citations.\n")
+            matches.forEach { (chunk, _) ->
+                append("\n[${documentsById[chunk.documentId]?.name ?: "Local document"}, section ${chunk.ordinal + 1}]\n")
+                append(chunk.text.take(MAX_CONTEXT_CHARS_PER_CHUNK))
+                append('\n')
             }
         }
     }

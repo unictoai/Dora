@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -128,6 +129,9 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::importGguf)
     }
+    val documentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::importDocument)
+    }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
         uri?.let(vm::exportActiveConversation)
     }
@@ -168,6 +172,7 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
                     vm,
                     onBrowseModels = vm::openModelDiscovery,
                     onImportModel = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
+                    onImportDocument = { documentLauncher.launch(arrayOf("text/plain", "text/markdown", "text/csv", "application/json", "application/xml")) },
                     onExport = {
                         val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
                             .replace(Regex("[^A-Za-z0-9._-]+"), "_")
@@ -238,7 +243,7 @@ private fun SetupPoint(title: String, description: String) {
 }
 
 @Composable
-private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onExport: () -> Unit) {
+private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onExport: () -> Unit) {
     val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: state.conversations.first()
     val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == ModelKind.TEXT && it.filePath != null && it.verified }
     var showSettings by remember { mutableStateOf(false) }
@@ -254,6 +259,9 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
             LocalStatus(isGenerating = state.isGenerating)
             IconButton(onClick = vm::toggleConversationList) {
                 Icon(Icons.Default.ChatBubbleOutline, contentDescription = if (state.showConversationList) "Hide conversations" else "Show conversations")
+            }
+            IconButton(onClick = vm::toggleDocumentPanel) {
+                Icon(Icons.Default.Description, contentDescription = if (state.showDocumentPanel) "Hide local documents" else "Show local documents")
             }
             IconButton(onClick = vm::createConversation, enabled = !state.isGenerating) {
                 Icon(Icons.Default.Add, contentDescription = "New conversation")
@@ -272,6 +280,16 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
                 onSelect = vm::selectConversation,
                 onRename = { renameConversationId = it },
                 onDelete = vm::deleteConversation,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+        if (state.showDocumentPanel) {
+            DocumentContextPanel(
+                documents = state.documents,
+                searchEnabled = state.documentSearchEnabled,
+                onImport = onImportDocument,
+                onToggleSearch = vm::toggleDocumentSearch,
+                onDelete = vm::deleteDocument,
             )
             Spacer(Modifier.height(10.dp))
         }
@@ -339,6 +357,47 @@ private fun NoModelChatState(onBrowseModels: () -> Unit, onImportModel: () -> Un
             }
             Spacer(Modifier.height(12.dp))
             Text("No cloud inference • No account required", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun DocumentContextPanel(
+    documents: List<app.dora.localai.domain.LocalDocument>,
+    searchEnabled: Boolean,
+    onImport: () -> Unit,
+    onToggleSearch: (Boolean) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Local context", style = MaterialTheme.typography.titleSmall)
+                    Text("Dora searches these private text files before local chat.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = searchEnabled, onCheckedChange = onToggleSearch)
+            }
+            if (documents.isEmpty()) {
+                Text("No documents indexed yet. Supported: text, Markdown, CSV, JSON, and XML up to 20 MB each.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                documents.forEach { document ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Description, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(document.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${formatBytesForUi(document.sizeBytes)} • ${document.chunkCount} sections", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { onDelete(document.id) }) { Icon(Icons.Default.DeleteOutline, contentDescription = "Remove ${document.name}") }
+                    }
+                }
+            }
+            OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth().height(40.dp), shape = RoundedCornerShape(12.dp)) {
+                Icon(Icons.Default.Description, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Add a local document")
+            }
         }
     }
 }

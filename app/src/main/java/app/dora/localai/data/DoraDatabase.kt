@@ -54,6 +54,29 @@ data class MessageRecord(
     val createdAt: Long,
 )
 
+@Entity(tableName = "document_records")
+data class DocumentRecord(
+    @androidx.room.PrimaryKey val id: String,
+    val name: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val sha256: String,
+    val chunkCount: Int,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val enabled: Boolean,
+    val errorMessage: String? = null,
+)
+
+@Entity(tableName = "document_chunks", indices = [Index(value = ["documentId"]), Index(value = ["documentId", "ordinal"], unique = true)])
+data class DocumentChunkRecord(
+    @androidx.room.PrimaryKey val id: String,
+    val documentId: String,
+    val ordinal: Int,
+    val text: String,
+    val searchableText: String,
+)
+
 @Entity(tableName = "job_records")
 data class JobRecord(
     @androidx.room.PrimaryKey val id: String,
@@ -139,9 +162,33 @@ interface DoraDao {
 
     @Query("DELETE FROM conversation_records")
     suspend fun deleteAllConversations()
+
+    @Query("SELECT * FROM document_records ORDER BY updatedAt DESC")
+    suspend fun allDocuments(): List<DocumentRecord>
+
+    @Query("SELECT * FROM document_chunks ORDER BY documentId ASC, ordinal ASC")
+    suspend fun allDocumentChunks(): List<DocumentChunkRecord>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertDocument(record: DocumentRecord)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertDocumentChunks(records: List<DocumentChunkRecord>)
+
+    @Query("DELETE FROM document_chunks WHERE documentId = :documentId")
+    suspend fun deleteDocumentChunks(documentId: String)
+
+    @Query("DELETE FROM document_records WHERE id = :id")
+    suspend fun deleteDocument(id: String)
+
+    @Query("DELETE FROM document_chunks")
+    suspend fun deleteAllDocumentChunks()
+
+    @Query("DELETE FROM document_records")
+    suspend fun deleteAllDocuments()
 }
 
-@Database(entities = [ModelRecord::class, JobRecord::class, ConversationRecord::class, MessageRecord::class], version = 4, exportSchema = true)
+@Database(entities = [ModelRecord::class, JobRecord::class, ConversationRecord::class, MessageRecord::class, DocumentRecord::class, DocumentChunkRecord::class], version = 5, exportSchema = true)
 abstract class DoraDatabase : RoomDatabase() {
     abstract fun dao(): DoraDao
 
@@ -190,9 +237,18 @@ abstract class DoraDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS document_records (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, mimeType TEXT NOT NULL, sizeBytes INTEGER NOT NULL, sha256 TEXT NOT NULL, chunkCount INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, enabled INTEGER NOT NULL, errorMessage TEXT)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS document_chunks (id TEXT NOT NULL PRIMARY KEY, documentId TEXT NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL, searchableText TEXT NOT NULL)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_document_chunks_documentId ON document_chunks (documentId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_document_chunks_documentId_ordinal ON document_chunks (documentId, ordinal)")
+            }
+        }
+
         fun get(context: Context): DoraDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, DoraDatabase::class.java, "dora.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
                 .also { instance = it }
         }
