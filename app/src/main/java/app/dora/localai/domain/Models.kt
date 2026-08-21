@@ -48,6 +48,7 @@ data class Conversation(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
     val messages: List<ChatMessage> = emptyList(),
+    val pinned: Boolean = false,
 )
 
 enum class JobKind { DOWNLOAD, TEXT, IMAGE }

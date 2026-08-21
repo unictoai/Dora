@@ -123,3 +123,8 @@ The slice also adds persisted System/Light/Dark theme selection, Android notific
 The next candidate slice adds explicit copy and Android share actions to completed messages, named per-model generation profiles persisted through LocalRegistry, Room model-manifest persistence for imports and downloads, startup repair of missing registry artifacts and verification state, real compatibility breakdowns, and additional safeguards around model lifecycle actions. A research note records why image generation remains gated behind a real Android-compatible backend and device validation rather than a simulated adapter.
 
 The candidate also hardens bounded conversation import for minSdk 26, adds destructive-action confirmations, local benchmark reporting, appearance controls, orphan-file cleanup, and prevents silent demo output when production native inference is unavailable. The repository remains pre-alpha until physical ARM64 acceptance testing is completed.
+
+
+## v0.13.0-prealpha candidate — 2026-08-21
+
+The next candidate adds durable pinned conversations backed by a Room v7 migration, pinned-first history ordering, local model filtering, and updated CI schema enforcement. Pin state is restored from Room, preserved during conversation upserts, disabled in incognito mode, and exposed with accessible pin/unpin labels. The feature was verified with Kotlin compilation, unit tests, full debug/release assembly, lint, and ARM64 native linking.

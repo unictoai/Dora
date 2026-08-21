@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.StopCircle
@@ -335,6 +336,7 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
                 activeId = state.activeConversationId,
                 onSelect = vm::selectConversation,
                 onRename = { renameConversationId = it },
+                onTogglePinned = vm::toggleConversationPinned,
                 onDelete = vm::deleteConversation,
             )
             Spacer(Modifier.height(10.dp))
@@ -491,6 +493,7 @@ private fun ConversationListPanel(
     activeId: String,
     onSelect: (String) -> Unit,
     onRename: (String) -> Unit,
+    onTogglePinned: (String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
@@ -518,6 +521,7 @@ private fun ConversationListPanel(
                                 Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth())
                             }
                             IconButton(onClick = { onRename(conversation.id) }) { Icon(Icons.Default.Edit, contentDescription = "Rename conversation") }
+                            IconButton(onClick = { onTogglePinned(conversation.id) }) { Icon(Icons.Default.PushPin, contentDescription = if (conversation.pinned) "Unpin conversation" else "Pin conversation", tint = if (conversation.pinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                             IconButton(onClick = { onDelete(conversation.id) }, enabled = conversations.size > 1) { Icon(Icons.Default.DeleteOutline, contentDescription = "Delete conversation") }
                         }
                     }
@@ -775,7 +779,9 @@ private fun InlineMarkdownText(text: String, modifier: Modifier = Modifier) {
 
 @Composable
 private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit) {
-    val models = state.models.filter { it.kind == ModelKind.TEXT }
+    val models = state.models.filter { model ->
+        model.kind == ModelKind.TEXT && (state.localModelQuery.isBlank() || listOf(model.name, model.publisher, model.format, model.description).any { it.contains(state.localModelQuery, ignoreCase = true) })
+    }
     var selectedModel by remember { mutableStateOf<LocalModel?>(null) }
     val downloadJobs = state.jobs.filter { it.kind == JobKind.DOWNLOAD }
     val visibleCandidates = when (state.catalogFilter) {
@@ -794,6 +800,15 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
         ScreenHeader("Models", "Discover, download, verify, and run private GGUF models.")
         Spacer(Modifier.height(14.dp))
+        OutlinedTextField(
+            value = state.localModelQuery,
+            onValueChange = vm::setLocalModelQuery,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            shape = RoundedCornerShape(16.dp),
+            placeholder = { Text("Filter models on this device") },
+        )
+        Spacer(Modifier.height(10.dp))
         OutlinedTextField(
             value = state.huggingFaceQuery,
             onValueChange = vm::setHuggingFaceQuery,
@@ -852,7 +867,11 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
                 }
             }
             item { Text("On this device", style = MaterialTheme.typography.titleMedium) }
-            items(models, key = { it.id }) { model -> ModelCard(model, vm, model.id == state.activeModelId, onDetails = { selectedModel = model }) }
+            if (models.isEmpty()) {
+                item { Text("No local models match this filter.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            } else {
+                items(models, key = { it.id }) { model -> ModelCard(model, vm, model.id == state.activeModelId, onDetails = { selectedModel = model }) }
+            }
             if (visibleCandidates.isNotEmpty()) {
                 item { Text("Suggested for this device", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp)) }
                 items(visibleCandidates, key = { it.repoId }) { candidate -> HuggingFaceCandidateCard(candidate, vm, state.activeDownloadId) }

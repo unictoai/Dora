@@ -102,6 +102,7 @@ data class DoraUiState(
     val nativeRuntimeVersion: String = "Unavailable",
     val deviceSummary: String = "Device profile pending",
     val huggingFaceQuery: String = "",
+    val localModelQuery: String = "",
     val huggingFaceCandidates: List<HuggingFaceCandidate> = emptyList(),
     val catalogFilter: CatalogFilter = CatalogFilter.ALL,
     val curatedSuggestions: List<CuratedModelSuggestion> = defaultCuratedModelSuggestions,
@@ -321,6 +322,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             Conversation(
                 id = record.id,
                 title = record.title,
+                pinned = record.pinned,
                 messages = dao.messagesForConversation(record.id).map { message ->
                     ChatMessage(
                         id = message.id,
@@ -365,13 +367,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             if (registry.isIncognito()) return@launch
             val now = System.currentTimeMillis()
+            val existing = dao.findConversation(conversation.id)
             val normalized = settings.normalized()
             dao.upsertConversation(
                 ConversationRecord(
                     id = conversation.id,
                     title = conversation.title,
-                    createdAt = now,
+                    createdAt = existing?.createdAt ?: now,
                     updatedAt = now,
+                    pinned = conversation.pinned,
                     systemPrompt = normalized.systemPrompt,
                     maxTokens = normalized.maxTokens,
                     threads = normalized.threads,
@@ -432,6 +436,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         persistConversation(conversation, settings)
+    }
+
+    fun toggleConversationPinned(id: String) {
+        if (registry.isIncognito()) {
+            _uiState.update { it.copy(toastMessage = "Pinned state is unavailable in incognito mode") }
+            return
+        }
+        val conversation = _uiState.value.conversations.firstOrNull { it.id == id } ?: return
+        val updated = conversation.copy(pinned = !conversation.pinned)
+        val settings = _uiState.value.conversationSettings[id] ?: GenerationSettings()
+        _uiState.update { state ->
+            state.copy(
+                conversations = (state.conversations.filterNot { it.id == id } + updated).sortedWith(compareByDescending<Conversation> { it.pinned }),
+                toastMessage = if (updated.pinned) "Conversation pinned" else "Conversation unpinned",
+            )
+        }
+        persistConversation(updated, settings)
     }
 
     fun renameConversation(id: String, title: String) {
@@ -534,6 +555,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setImagePrompt(value: String) = _uiState.update { it.copy(imagePrompt = value) }
 
     fun setHuggingFaceQuery(value: String) = _uiState.update { it.copy(huggingFaceQuery = value) }
+
+    fun setLocalModelQuery(value: String) = _uiState.update { it.copy(localModelQuery = value.take(80)) }
 
     fun setCatalogFilter(filter: CatalogFilter) = _uiState.update { it.copy(catalogFilter = filter) }
 

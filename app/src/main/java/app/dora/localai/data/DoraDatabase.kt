@@ -36,6 +36,7 @@ data class ConversationRecord(
     val title: String,
     val createdAt: Long,
     val updatedAt: Long,
+    val pinned: Boolean = false,
     val systemPrompt: String,
     val maxTokens: Int,
     val threads: Int,
@@ -147,8 +148,11 @@ interface DoraDao {
     @Query("DELETE FROM job_records WHERE id = :id")
     suspend fun deleteJob(id: String)
 
-    @Query("SELECT * FROM conversation_records ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM conversation_records ORDER BY pinned DESC, updatedAt DESC")
     suspend fun allConversations(): List<ConversationRecord>
+
+    @Query("SELECT * FROM conversation_records WHERE id = :id LIMIT 1")
+    suspend fun findConversation(id: String): ConversationRecord?
 
     @Query("SELECT * FROM message_records WHERE conversationId = :conversationId ORDER BY ordinal ASC")
     suspend fun messagesForConversation(conversationId: String): List<MessageRecord>
@@ -205,7 +209,7 @@ interface DoraDao {
     suspend fun deleteAllDocuments()
 }
 
-@Database(entities = [ModelRecord::class, JobRecord::class, ConversationRecord::class, MessageRecord::class, DocumentRecord::class, DocumentChunkRecord::class], version = 6, exportSchema = true)
+@Database(entities = [ModelRecord::class, JobRecord::class, ConversationRecord::class, MessageRecord::class, DocumentRecord::class, DocumentChunkRecord::class], version = 7, exportSchema = true)
 abstract class DoraDatabase : RoomDatabase() {
     abstract fun dao(): DoraDao
 
@@ -273,9 +277,15 @@ abstract class DoraDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 7) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversation_records ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): DoraDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, DoraDatabase::class.java, "dora.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
                 .also { instance = it }
         }

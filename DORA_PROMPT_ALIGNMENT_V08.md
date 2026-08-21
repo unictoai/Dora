@@ -62,3 +62,8 @@ The hardening slice now refuses silent demo substitution in the user-facing nati
 ## v0.12 candidate evidence — 2026-08-21
 
 Additional verified work includes copy/share actions for completed messages, named per-model generation profiles, Room model-manifest persistence, registry repair during reconciliation, destructive model/data confirmations, and minSdk-26-safe bounded import reading. The image-runtime research note documents an Android ARM64 build path for stable-diffusion.cpp but also records the missing cross-device embedding and acceptance evidence; Dora therefore keeps image generation gated instead of simulating it.
+
+
+## v0.13 candidate evidence — 2026-08-21
+
+Dora now supports durable pinned conversations through a Room v7 migration and pinned-first ordering, plus an installed-model filter independent of Hugging Face discovery. The v7 schema fixture is generated and CI now enforces it. Pinning is unavailable in incognito mode by design, and the local model filter reports an explicit empty state rather than hiding the absence of matches.
