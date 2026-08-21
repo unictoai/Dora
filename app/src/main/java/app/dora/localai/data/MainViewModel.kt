@@ -14,6 +14,8 @@ import androidx.lifecycle.viewModelScope
 import app.dora.localai.DoraApplication
 import app.dora.localai.domain.CatalogFilter
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.CuratedModelSuggestion
+import app.dora.localai.domain.defaultCuratedModelSuggestions
 import app.dora.localai.domain.DownloadProgress
 import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.DeviceFitLevel
@@ -89,6 +91,7 @@ data class DoraUiState(
     val huggingFaceQuery: String = "",
     val huggingFaceCandidates: List<HuggingFaceCandidate> = emptyList(),
     val catalogFilter: CatalogFilter = CatalogFilter.ALL,
+    val curatedSuggestions: List<CuratedModelSuggestion> = defaultCuratedModelSuggestions,
     val isSearchingHuggingFace: Boolean = false,
     val activeDownloadId: String? = null,
     val expandedDownloadId: String? = null,
@@ -393,6 +396,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectTab(tab: Int) = _uiState.update { it.copy(selectedTab = tab, toastMessage = null) }
+
+    fun openModelDiscovery() {
+        _uiState.update { it.copy(selectedTab = 1, toastMessage = null) }
+    }
+
+    fun openCuratedSuggestion(suggestion: CuratedModelSuggestion) {
+        _uiState.update { it.copy(selectedTab = 1, huggingFaceQuery = suggestion.repoId, toastMessage = null) }
+        browseHuggingFace()
+    }
 
     fun toggleDownloadDetails(downloadId: String) = _uiState.update { state ->
         state.copy(expandedDownloadId = if (state.expandedDownloadId == downloadId) null else downloadId)

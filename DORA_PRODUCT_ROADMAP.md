@@ -31,3 +31,11 @@ Dora should move the native facade toward a `ModelSessionManager` responsible fo
 ## Release criteria
 
 A beta candidate requires successful debug and release builds, JVM tests, lint, Room migration checks, a signed release artifact, ARM64 package verification, and a physical-device acceptance run covering discovery, download, background notification, pause, resume, completion stages, chat, stop generation, process restart, offline inference, deletion, and storage reconciliation. No beta claim should be made until the physical-device run is recorded.
+
+## Current UX milestone: Explore before install
+
+Dora now opens into the full three-tab product shell even when no verified model is installed. New users can explore Chat, Models, and Settings before downloading weights, while the empty chat state clearly explains the local model requirement and routes directly to model recommendations or local GGUF import. The chat composer and send control are disabled until a verified local text model is active, preventing a misleading demo interaction.
+
+The Download Center now includes a curated “Start here” section with real Hugging Face repository IDs for a compact Qwen starter, SmolLM2 lightweight chat, Qwen Coder, and Phi Mini balanced chat. Each card explains its intended use and routes to a repository-specific search that displays the actual compatible files, quantizations, device-fit status, license, and provenance before download. This is inspired by mobile local-AI browsing patterns while preserving Dora’s own integrity checks and ARM64 constraints.
+
+The curated list is deliberately not treated as a substitute for live compatibility. Repository metadata can change, and Dora always re-fetches the repository and evaluates the exact GGUF file against the current device before enabling download. Image generation, voice, vision, RAG, plugins, and remote providers remain explicit future milestones until their runtimes and acceptance tests exist.

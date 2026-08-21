@@ -36,8 +36,8 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
@@ -76,7 +76,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,6 +95,7 @@ import app.dora.localai.data.MainViewModel
 import app.dora.localai.domain.CatalogFilter
 import app.dora.localai.domain.ChatMessage
 import app.dora.localai.domain.Conversation
+import app.dora.localai.domain.CuratedModelSuggestion
 import app.dora.localai.domain.DeviceFitLevel
 import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.DoraJob
@@ -125,14 +125,12 @@ private data class DoraDestination(
 fun DoraApp(vm: MainViewModel = viewModel()) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::importGguf)
     }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
         uri?.let(vm::exportActiveConversation)
     }
-    val hasModel = state.models.any { it.kind == ModelKind.TEXT && it.filePath != null }
     val destinations = listOf(
         DoraDestination("Chat", Icons.Default.ChatBubbleOutline),
         DoraDestination("Models", Icons.Default.Memory),
@@ -144,17 +142,6 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
             snackbarHostState.showSnackbar(it)
             vm.clearToast()
         }
-    }
-
-    if (!hasModel && state.selectedTab != 1) {
-        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            ModelSetupScreen(
-                onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
-                onBrowse = { vm.selectTab(1) },
-            )
-        }
-        SnackbarHost(hostState = snackbarHostState)
-        return
     }
 
     Scaffold(
@@ -176,13 +163,19 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             when (state.selectedTab) {
-                0 -> ChatScreen(state, vm, onExport = {
-                    val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
-                        .replace(Regex("[^A-Za-z0-9._-]+"), "_")
-                        .trim('_')
-                        .ifBlank { "dora-conversation" }
-                    exportLauncher.launch("$title.md")
-                })
+                0 -> ChatScreen(
+                    state,
+                    vm,
+                    onBrowseModels = vm::openModelDiscovery,
+                    onImportModel = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
+                    onExport = {
+                        val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
+                            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+                            .trim('_')
+                            .ifBlank { "dora-conversation" }
+                        exportLauncher.launch("$title.md")
+                    },
+                )
                 1 -> ModelsScreen(state, vm, onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) })
                 else -> SettingsScreen(state, vm)
             }
@@ -245,7 +238,7 @@ private fun SetupPoint(title: String, description: String) {
 }
 
 @Composable
-private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onExport: () -> Unit) {
+private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onExport: () -> Unit) {
     val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: state.conversations.first()
     val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == ModelKind.TEXT && it.filePath != null && it.verified }
     var showSettings by remember { mutableStateOf(false) }
@@ -256,7 +249,7 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onExport: () -> Un
         Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Dora", style = MaterialTheme.typography.headlineSmall)
-                Text(activeModel?.name ?: "Local chat", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(activeModel?.name ?: "Explore local AI", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             LocalStatus(isGenerating = state.isGenerating)
             IconButton(onClick = vm::toggleConversationList) {
@@ -283,20 +276,24 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onExport: () -> Un
             Spacer(Modifier.height(10.dp))
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.65f))
-        ChatHistory(conversation.messages, modifier = Modifier.weight(1f).fillMaxWidth())
+        if (activeModel == null && conversation.messages.isEmpty()) {
+            NoModelChatState(onBrowseModels = onBrowseModels, onImportModel = onImportModel, modifier = Modifier.weight(1f).fillMaxWidth())
+        } else {
+            ChatHistory(conversation.messages, modifier = Modifier.weight(1f).fillMaxWidth())
+        }
         Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
             OutlinedTextField(
                 value = state.composerText,
                 onValueChange = vm::setComposerText,
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Message Dora") },
+                placeholder = { Text(if (activeModel == null) "Install a model to start" else "Message Dora") },
                 maxLines = 5,
                 shape = RoundedCornerShape(18.dp),
-                enabled = !state.isGenerating,
+                enabled = !state.isGenerating && activeModel != null,
             )
-            Surface(modifier = Modifier.size(52.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.primary) {
-                IconButton(onClick = { if (state.isGenerating) vm.stopGeneration() else vm.sendMessage() }) {
-                    Icon(if (state.isGenerating) Icons.Default.StopCircle else Icons.AutoMirrored.Filled.Send, contentDescription = if (state.isGenerating) "Stop" else "Send", tint = MaterialTheme.colorScheme.onPrimary)
+            Surface(modifier = Modifier.size(52.dp), shape = RoundedCornerShape(18.dp), color = if (activeModel != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant) {
+                IconButton(onClick = { if (state.isGenerating) vm.stopGeneration() else vm.sendMessage() }, enabled = state.isGenerating || activeModel != null) {
+                    Icon(if (state.isGenerating) Icons.Default.StopCircle else Icons.AutoMirrored.Filled.Send, contentDescription = if (state.isGenerating) "Stop" else "Send", tint = if (activeModel != null || state.isGenerating) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -314,6 +311,35 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onExport: () -> Un
             onDismiss = { renameConversationId = null },
             onSave = { vm.renameConversation(id, it); renameConversationId = null },
         )
+    }
+}
+
+@Composable
+private fun NoModelChatState(onBrowseModels: () -> Unit, onImportModel: () -> Unit, modifier: Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 18.dp)) {
+            Surface(modifier = Modifier.size(76.dp), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                Icon(Icons.Default.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.padding(20.dp))
+            }
+            Spacer(Modifier.height(18.dp))
+            Text("Explore Dora", style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(8.dp))
+            Text("Dora runs verified GGUF models on this device. Browse recommendations first, or import a model you already have.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(20.dp))
+            Button(onClick = onBrowseModels, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(15.dp)) {
+                Icon(Icons.Default.Memory, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Explore model recommendations")
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = onImportModel, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(15.dp)) {
+                Icon(Icons.Default.Download, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Import a local GGUF")
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("No cloud inference • No account required", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -488,6 +514,7 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 18.dp, bottom = 24.dp),
         ) {
+            item { CuratedSuggestionsSection(state.curatedSuggestions, vm) }
             item { DownloadCenterSummary(state, downloadJobs) }
             sections.forEach { (title, jobs) ->
                 if (jobs.isNotEmpty()) {
@@ -514,6 +541,39 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
             } else {
                 item {
                     Text("Search Hugging Face for public GGUF files. Dora ranks quantizations by measured RAM, storage, and ARM64 support.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CuratedSuggestionsSection(suggestions: List<CuratedModelSuggestion>, vm: MainViewModel) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Start here", style = MaterialTheme.typography.titleMedium)
+                Text("Curated GGUF paths for your first local model", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("Hugging Face", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+        }
+        suggestions.forEach { suggestion ->
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(modifier = Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Row(verticalAlignment = Alignment.Top) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(suggestion.title, style = MaterialTheme.typography.titleSmall)
+                            Text(suggestion.category, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        }
+                        Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                            Text(suggestion.fitHint, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                        }
+                    }
+                    Text(suggestion.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Text(suggestion.repoId, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Button(onClick = { vm.openCuratedSuggestion(suggestion) }, modifier = Modifier.fillMaxWidth().height(40.dp), shape = RoundedCornerShape(12.dp)) {
+                        Text("View compatible files")
+                    }
                 }
             }
         }
@@ -762,7 +822,7 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
         Spacer(Modifier.height(12.dp))
-        Text("Dora 0.5.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Text("Dora 0.6.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
 }
 
