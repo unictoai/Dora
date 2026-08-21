@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -84,7 +85,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -452,6 +458,16 @@ private fun GenerationSettingsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("These controls are applied to the on-device llama.cpp session.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Profiles", style = MaterialTheme.typography.labelMedium)
+                Row(modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        "Balanced" to app.dora.localai.domain.GenerationSettings(),
+                        "Creative" to draft.copy(temperature = 1.0f, topP = 0.98f, topK = 60, maxTokens = 512),
+                        "Focused" to draft.copy(temperature = 0.25f, topP = 0.85f, topK = 20, maxTokens = 384),
+                    ).forEach { (label, profile) ->
+                        FilterChip(selected = false, onClick = { draft = profile.normalized() }, label = { Text(label) })
+                    }
+                }
                 OutlinedTextField(
                     value = draft.systemPrompt,
                     onValueChange = { draft = draft.copy(systemPrompt = it) },
@@ -506,13 +522,78 @@ private fun MessageBubble(message: ChatMessage) {
         Column(modifier = Modifier.fillMaxWidth(if (isUser) 0.84f else 0.94f)) {
             Text(if (isUser) "You" else "Dora", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(4.dp))
-            Text(message.text.ifBlank { "…" }, style = MaterialTheme.typography.bodyLarge)
+            MarkdownContent(message.text.ifBlank { "…" })
             if (message.isPartial) {
                 Spacer(Modifier.height(8.dp))
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            } else {
+                message.metrics?.let { metrics ->
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        "%.1f tok/s • %d ms first token • %d tokens • %d context tokens".format(metrics.tokensPerSecond, metrics.firstTokenLatencyMillis, metrics.tokensGenerated, metrics.contextTokenEstimate),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
+}
+
+@Composable
+private fun MarkdownContent(text: String) {
+    val lines = text.replace("\r\n", "\n").split('\n')
+    var inCode = false
+    val codeBuffer = StringBuilder()
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        lines.forEach { line ->
+            if (line.trimStart().startsWith("```")) {
+                if (inCode) {
+                    Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                        BasicText(codeBuffer.toString().trimEnd(), modifier = Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant))
+                    }
+                    codeBuffer.clear()
+                }
+                inCode = !inCode
+            } else if (inCode) {
+                codeBuffer.appendLine(line)
+            } else {
+                when {
+                    line.startsWith("### ") -> Text(line.removePrefix("### "), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    line.startsWith("## ") -> Text(line.removePrefix("## "), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    line.startsWith("# ") -> Text(line.removePrefix("# "), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> Row(verticalAlignment = Alignment.Top) {
+                        Text("•", color = MaterialTheme.colorScheme.primary, modifier = Modifier.width(18.dp))
+                        InlineMarkdownText(line.trimStart().drop(2), Modifier.weight(1f))
+                    }
+                    line.isBlank() -> Spacer(Modifier.height(3.dp))
+                    else -> InlineMarkdownText(line, Modifier.fillMaxWidth())
+                }
+            }
+        }
+        if (inCode && codeBuffer.isNotEmpty()) {
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                BasicText(codeBuffer.toString().trimEnd(), modifier = Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant))
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineMarkdownText(text: String, modifier: Modifier = Modifier) {
+    val annotated = buildAnnotatedString {
+        var cursor = 0
+        val pattern = Regex("(\\*\\*[^*]+\\*\\*|`[^`]+`)")
+        pattern.findAll(text).forEach { match ->
+            append(text.substring(cursor, match.range.first))
+            val value = match.value
+            if (value.startsWith("**")) withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(value.removeSurrounding("**")) }
+            else withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = MaterialTheme.colorScheme.surfaceVariant)) { append(value.removeSurrounding("`")) }
+            cursor = match.range.last + 1
+        }
+        append(text.substring(cursor))
+    }
+    BasicText(annotated, modifier = modifier, style = MaterialTheme.typography.bodyLarge)
 }
 
 @Composable
@@ -869,6 +950,20 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
             Switch(checked = state.isOfflineOnly, onCheckedChange = { vm.toggleOfflineOnly() })
         }
         HorizontalDivider()
+        SettingRow(Icons.Default.Lock, "Incognito mode", "New chat turns stay in memory and are not written to Room. Existing history is not deleted.") {
+            Switch(checked = state.privacyIncognito, onCheckedChange = { vm.toggleIncognito() })
+        }
+        HorizontalDivider()
+        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Conversation retention", fontWeight = FontWeight.SemiBold)
+            Text("Automatically remove saved conversations older than the selected window. Models and documents are not affected.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(0 to "Keep", 7 to "7 days", 30 to "30 days", 90 to "90 days").forEach { (days, label) ->
+                    FilterChip(selected = state.retentionDays == days, onClick = { vm.setRetentionDays(days) }, label = { Text(label) })
+                }
+            }
+        }
+        HorizontalDivider()
         SettingRow(Icons.Default.Memory, "Device", state.deviceSummary)
         HorizontalDivider()
         SettingRow(
@@ -881,7 +976,7 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
         Spacer(Modifier.height(12.dp))
-        Text("Dora 0.6.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Text("Dora 0.8.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
 }
 

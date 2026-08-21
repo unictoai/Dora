@@ -21,6 +21,7 @@ import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.DeviceFitLevel
 import app.dora.localai.domain.GenerationSettings
 import app.dora.localai.domain.HuggingFaceCandidate
+import app.dora.localai.domain.InferenceMetrics
 import app.dora.localai.domain.HuggingFaceFileCandidate
 import app.dora.localai.domain.Conversation
 import app.dora.localai.domain.DoraJob
@@ -103,6 +104,8 @@ data class DoraUiState(
     val documents: List<LocalDocument> = emptyList(),
     val documentSearchEnabled: Boolean = true,
     val showDocumentPanel: Boolean = false,
+    val privacyIncognito: Boolean = false,
+    val retentionDays: Int = 0,
     val conversationSettings: Map<String, GenerationSettings> = emptyMap(),
     val storageSummary: DoraStorageSummary = DoraStorageSummary(),
 )
@@ -176,6 +179,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             models = allModels,
             activeModelId = restoredActiveModel ?: fallbackActiveModel,
             isOfflineOnly = registry.isOfflineOnly(),
+            privacyIncognito = registry.isIncognito(),
+            retentionDays = registry.retentionDays(),
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
             deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
             storageSummary = storageSummary(),
@@ -291,6 +296,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadConversations() {
+        val retentionDays = registry.retentionDays()
+        if (retentionDays > 0) {
+            val cutoff = System.currentTimeMillis() - retentionDays * 24L * 60L * 60L * 1_000L
+            dao.deleteMessagesOlderThan(cutoff)
+            dao.deleteConversationsOlderThan(cutoff)
+        }
         val records = dao.allConversations()
         val restored = records.map { record ->
             Conversation(
@@ -301,6 +312,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         id = message.id,
                         role = runCatching { MessageRole.valueOf(message.role) }.getOrDefault(MessageRole.ASSISTANT),
                         text = message.text,
+                        metrics = if (message.firstTokenLatencyMillis != null && message.generationTimeMillis != null && message.tokensGenerated != null && message.tokensPerSecond != null && message.contextTokenEstimate != null) InferenceMetrics(
+                            firstTokenLatencyMillis = message.firstTokenLatencyMillis,
+                            generationTimeMillis = message.generationTimeMillis,
+                            tokensGenerated = message.tokensGenerated,
+                            tokensPerSecond = message.tokensPerSecond,
+                            contextTokenEstimate = message.contextTokenEstimate,
+                        ) else null,
                     )
                 },
             )
@@ -331,6 +349,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun persistConversation(conversation: Conversation, settings: GenerationSettings) {
         viewModelScope.launch(Dispatchers.IO) {
+            if (registry.isIncognito()) return@launch
             val now = System.currentTimeMillis()
             val normalized = settings.normalized()
             dao.upsertConversation(
@@ -740,11 +759,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(isOfflineOnly = value) }
     }
 
+    fun toggleIncognito() {
+        val value = !_uiState.value.privacyIncognito
+        registry.setIncognito(value)
+        _uiState.update { it.copy(privacyIncognito = value, toastMessage = if (value) "Incognito on: new chat turns stay in memory only" else "Incognito off: new chat turns can be saved") }
+    }
+
+    fun setRetentionDays(days: Int) {
+        val value = days.takeIf { it in setOf(0, 7, 30, 90) } ?: 0
+        registry.setRetentionDays(value)
+        _uiState.update { it.copy(retentionDays = value) }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (value > 0) {
+                val cutoff = System.currentTimeMillis() - value * 24L * 60L * 60L * 1_000L
+                dao.deleteMessagesOlderThan(cutoff)
+                dao.deleteConversationsOlderThan(cutoff)
+            }
+        }
+    }
+
     fun clearAllLocalData() {
         registry.clearAll()
         viewModelScope.launch(Dispatchers.IO) {
             dao.deleteAllMessages()
             dao.deleteAllConversations()
+            dao.deleteAllDocumentChunks()
+            dao.deleteAllDocuments()
         }
         val freshConversation = Conversation(title = "New local conversation")
         _uiState.value = DoraUiState(
@@ -874,11 +914,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val systemPrompt = listOf(settings.systemPrompt.takeIf { it.isNotBlank() }, documentPrompt.takeIf { it.isNotBlank() }).filterNotNull().joinToString("\n\n")
                 val history = if (systemPrompt.isBlank()) conversation.messages else listOf(ChatMessage(role = MessageRole.SYSTEM, text = systemPrompt)) + conversation.messages
                 var accumulated = ""
+                var tokenCount = 0
+                var firstTokenAtNanos: Long? = null
+                val startedAtNanos = System.nanoTime()
                 engine.streamReply(activeModel ?: starterTextModel, history, settings).collect { token ->
+                    if (firstTokenAtNanos == null) firstTokenAtNanos = System.nanoTime()
+                    tokenCount += estimateTokenCount(token)
                     accumulated += token
                     updateLastAssistant(conversationId, accumulated, true)
                 }
-                updateLastAssistant(conversationId, accumulated, false)
+                val finishedAtNanos = System.nanoTime()
+                val elapsedMillis = ((finishedAtNanos - startedAtNanos) / 1_000_000L).coerceAtLeast(1L)
+                val metrics = InferenceMetrics(
+                    firstTokenLatencyMillis = firstTokenAtNanos?.let { (it - startedAtNanos) / 1_000_000L } ?: elapsedMillis,
+                    generationTimeMillis = elapsedMillis,
+                    tokensGenerated = tokenCount.coerceAtLeast(estimateTokenCount(accumulated)),
+                    tokensPerSecond = tokenCount.coerceAtLeast(estimateTokenCount(accumulated)) * 1_000f / elapsedMillis,
+                    contextTokenEstimate = history.sumOf { estimateTokenCount(it.text) },
+                )
+                updateLastAssistant(conversationId, accumulated, false, metrics)
                 persistLastAssistant(conversationId)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
@@ -955,6 +1009,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun persistMessage(conversationId: String, message: ChatMessage, ordinal: Long) {
         viewModelScope.launch(Dispatchers.IO) {
+            if (registry.isIncognito()) return@launch
             dao.upsertMessage(
                 MessageRecord(
                     id = message.id,
@@ -963,6 +1018,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     text = message.text,
                     ordinal = ordinal,
                     createdAt = System.currentTimeMillis(),
+                    firstTokenLatencyMillis = message.metrics?.firstTokenLatencyMillis,
+                    generationTimeMillis = message.metrics?.generationTimeMillis,
+                    tokensGenerated = message.metrics?.tokensGenerated,
+                    tokensPerSecond = message.metrics?.tokensPerSecond,
+                    contextTokenEstimate = message.metrics?.contextTokenEstimate,
                 ),
             )
         }
@@ -984,17 +1044,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun estimateTokenCount(text: String): Int = text.trim().takeIf { it.isNotEmpty() }?.split(Regex("\\s+"))?.size ?: 0
+
     private fun formatBytes(bytes: Long): String = when {
         bytes >= 1024 * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
         bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
         else -> "%.1f KB".format(bytes / 1024.0)
     }
 
-    private fun updateLastAssistant(id: String, text: String, partial: Boolean) {
+    private fun updateLastAssistant(id: String, text: String, partial: Boolean, metrics: InferenceMetrics? = null) {
         updateConversation(id) { conversation ->
             val messages = conversation.messages.toMutableList()
             val index = messages.indexOfLast { it.role == MessageRole.ASSISTANT }
-            if (index >= 0) messages[index] = messages[index].copy(text = text, isPartial = partial)
+            if (index >= 0) messages[index] = messages[index].copy(text = text, isPartial = partial, metrics = metrics ?: messages[index].metrics)
             conversation.copy(messages = messages)
         }
     }

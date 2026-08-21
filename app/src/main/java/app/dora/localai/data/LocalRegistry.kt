@@ -24,6 +24,18 @@ class LocalRegistry(context: Context) {
         prefs.edit().putBoolean(KEY_OFFLINE_ONLY, value).apply()
     }
 
+    fun isIncognito(): Boolean = prefs.getBoolean(KEY_INCOGNITO, false)
+
+    fun setIncognito(value: Boolean) {
+        prefs.edit().putBoolean(KEY_INCOGNITO, value).apply()
+    }
+
+    fun retentionDays(): Int = prefs.getInt(KEY_RETENTION_DAYS, 0).coerceIn(0, 365)
+
+    fun setRetentionDays(value: Int) {
+        prefs.edit().putInt(KEY_RETENTION_DAYS, value.coerceIn(0, 365)).apply()
+    }
+
     fun activeModelId(): String? = prefs.getString(KEY_ACTIVE_MODEL, null)
 
     fun setActiveModelId(modelId: String?) {
@@ -96,5 +108,7 @@ class LocalRegistry(context: Context) {
         const val KEY_INSTALLED_MODELS = "installed_models"
         const val KEY_ACTIVE_MODEL = "active_model"
         const val KEY_INVALID_ARTIFACTS = "invalid_artifacts"
+        const val KEY_INCOGNITO = "incognito"
+        const val KEY_RETENTION_DAYS = "retention_days"
     }
 }

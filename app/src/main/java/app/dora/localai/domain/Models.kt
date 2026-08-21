@@ -29,6 +29,7 @@ data class ChatMessage(
     val role: MessageRole,
     val text: String,
     val isPartial: Boolean = false,
+    val metrics: InferenceMetrics? = null,
 )
 
 data class Conversation(

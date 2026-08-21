@@ -52,6 +52,11 @@ data class MessageRecord(
     val text: String,
     val ordinal: Long,
     val createdAt: Long,
+    val firstTokenLatencyMillis: Long? = null,
+    val generationTimeMillis: Long? = null,
+    val tokensGenerated: Int? = null,
+    val tokensPerSecond: Float? = null,
+    val contextTokenEstimate: Int? = null,
 )
 
 @Entity(tableName = "document_records")
@@ -157,6 +162,12 @@ interface DoraDao {
     @Query("DELETE FROM conversation_records WHERE id = :id")
     suspend fun deleteConversation(id: String)
 
+    @Query("DELETE FROM message_records WHERE conversationId IN (SELECT id FROM conversation_records WHERE updatedAt < :cutoff)")
+    suspend fun deleteMessagesOlderThan(cutoff: Long)
+
+    @Query("DELETE FROM conversation_records WHERE updatedAt < :cutoff")
+    suspend fun deleteConversationsOlderThan(cutoff: Long)
+
     @Query("DELETE FROM message_records")
     suspend fun deleteAllMessages()
 
@@ -188,7 +199,7 @@ interface DoraDao {
     suspend fun deleteAllDocuments()
 }
 
-@Database(entities = [ModelRecord::class, JobRecord::class, ConversationRecord::class, MessageRecord::class, DocumentRecord::class, DocumentChunkRecord::class], version = 5, exportSchema = true)
+@Database(entities = [ModelRecord::class, JobRecord::class, ConversationRecord::class, MessageRecord::class, DocumentRecord::class, DocumentChunkRecord::class], version = 6, exportSchema = true)
 abstract class DoraDatabase : RoomDatabase() {
     abstract fun dao(): DoraDao
 
@@ -246,9 +257,19 @@ abstract class DoraDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE message_records ADD COLUMN firstTokenLatencyMillis INTEGER")
+                db.execSQL("ALTER TABLE message_records ADD COLUMN generationTimeMillis INTEGER")
+                db.execSQL("ALTER TABLE message_records ADD COLUMN tokensGenerated INTEGER")
+                db.execSQL("ALTER TABLE message_records ADD COLUMN tokensPerSecond REAL")
+                db.execSQL("ALTER TABLE message_records ADD COLUMN contextTokenEstimate INTEGER")
+            }
+        }
+
         fun get(context: Context): DoraDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, DoraDatabase::class.java, "dora.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
                 .also { instance = it }
         }
