@@ -6,6 +6,17 @@ enum class ModelKind { TEXT, IMAGE }
 
 enum class ModelInstallState { AVAILABLE, INSTALLED, EXTERNAL, INVALID }
 
+data class ModelMetadata(
+    val architecture: String? = null,
+    val displayName: String? = null,
+    val quantization: String? = null,
+    val contextLength: Long? = null,
+    val parameterCount: Long? = null,
+    val blockCount: Long? = null,
+    val embeddingLength: Long? = null,
+    val vocabularySize: Long? = null,
+)
+
 data class LocalModel(
     val id: String,
     val name: String,
@@ -20,6 +31,7 @@ data class LocalModel(
     val verified: Boolean,
     val recommended: Boolean,
     val filePath: String? = null,
+    val metadata: ModelMetadata? = null,
 )
 
 enum class MessageRole { USER, ASSISTANT, SYSTEM }

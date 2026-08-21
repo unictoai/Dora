@@ -34,3 +34,21 @@ The following requirements remain explicitly future milestones: production seman
 ## Acceptance gates
 
 A v0.8 release may claim implementation completion only for features covered by source-level tests, JVM tests, migration checks, lint, debug/release builds, APK signature verification, and ARM64 native packaging. A beta claim additionally requires a physical ARM64 device run covering model discovery, download/recovery, native load, generation cancellation, document import/retrieval, chat persistence, storage reconciliation, thermal behavior, notifications, and offline mode. A performance-superiority claim requires a reproducible benchmark matrix; it must not be inferred from a successful build.
+
+## v0.9 implementation evidence — 2026-08-21
+
+The following prompt-aligned capabilities are now implemented on top of the preserved Dora architecture:
+
+| Prompt-aligned area | Evidence in Dora | Boundary or caveat |
+|---|---|---|
+| Transparent local inference | `InferenceMetrics`, Room v6 columns, completed-message telemetry, runtime diagnostics | Throughput and latency still require physical ARM64 measurements; sandbox builds are not benchmarks |
+| Trustworthy chat UX | Markdown headings, emphasis, inline code, fenced code blocks, profiles, and system-prompt templates | Rendering is intentionally lightweight and not a full CommonMark engine |
+| Privacy controls | Incognito mode skips Room writes for new turns; Keep/7/30/90-day retention cleanup is scoped to conversations | Existing history remains until explicitly deleted; models/documents are unaffected by retention |
+| Export and portability | Explicit Markdown/JSON choice; Markdown includes metrics; JSON preserves role/text/metrics structure | Export is user-initiated through Android’s document picker |
+| Model transparency | Bounded GGUF metadata reader and model-detail dialog | Missing metadata is shown as unavailable; no metadata is guessed |
+| Context awareness | Header shows an estimated token count and parsed model context limit when available | Estimate is whitespace-based and is not a tokenizer measurement |
+| Discovery and recovery | Existing Hugging Face catalog and download state machine remain intact | Gated repositories still require user-mediated access; no hidden credentials |
+
+Verification for this evidence pass completed with the debug Kotlin compile, unit tests, debug APK assembly, release APK assembly, lint, and ARM64 native CMake build. Added unit coverage checks metric normalization and representative GGUF scalar metadata parsing. The CI Room schema guard checks the committed v6 fixture.
+
+The current milestone remains a pre-alpha release. Dora intentionally does not claim image generation, voice, vision, cloud providers, plugins, MCP, or tool execution. The Comprehensive Development Prompt’s `minSdk 35` recommendation is not adopted: Dora retains `minSdk 26` to support Android 8+ as an explicit product constraint, and Hilt/Koin migration remains out of scope for this milestone.

@@ -79,6 +79,8 @@ private val imageModel = LocalModel(
     recommended = false,
 )
 
+enum class ConversationExportFormat { MARKDOWN, JSON }
+
 data class DoraUiState(
     val selectedTab: Int = 0,
     val models: List<LocalModel> = listOf(starterTextModel, imageModel),
@@ -92,6 +94,7 @@ data class DoraUiState(
     val isGenerating: Boolean = false,
     val toastMessage: String? = null,
     val runtimeNotice: String = "Demo adapter active — native llama.cpp bridge is next",
+    val nativeRuntimeVersion: String = "Unavailable",
     val deviceSummary: String = "Device profile pending",
     val huggingFaceQuery: String = "",
     val huggingFaceCandidates: List<HuggingFaceCandidate> = emptyList(),
@@ -153,6 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 verified = model.kind == app.dora.localai.domain.ModelKind.TEXT,
                 filePath = artifact?.path,
                 sizeLabel = artifact?.sizeBytes?.let { formatBytes(it) } ?: model.sizeLabel,
+                metadata = artifact?.path?.let { path -> GgufMetadataReader.read(File(path)).getOrNull() },
             ) else model
         }
         val downloadedModels = registry.allArtifacts().filterNot { it.id in builtInIds }.map { artifact ->
@@ -170,6 +174,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 verified = true,
                 recommended = false,
                 filePath = artifact.path,
+                metadata = GgufMetadataReader.read(File(artifact.path)).getOrNull(),
             )
         }
         val allModels = builtInModels + downloadedModels
@@ -182,6 +187,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             privacyIncognito = registry.isIncognito(),
             retentionDays = registry.retentionDays(),
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
+            nativeRuntimeVersion = runCatching { NativeLlamaEngine.version() }.getOrElse { "Unavailable" },
             deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
             storageSummary = storageSummary(),
         )
@@ -318,7 +324,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             tokensGenerated = message.tokensGenerated,
                             tokensPerSecond = message.tokensPerSecond,
                             contextTokenEstimate = message.contextTokenEstimate,
-                        ) else null,
+                        ).normalized() else null,
                     )
                 },
             )
@@ -619,8 +625,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val artifact = registry.artifact(modelId)
                         val installed = artifact?.let { model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = true, filePath = it.path) }
                         if (installed != null) {
+                            val metadata = withContext(Dispatchers.IO) { GgufMetadataReader.read(File(artifact.path)).getOrNull() }
+                            val installedWithMetadata = installed.copy(metadata = metadata)
                             if (_uiState.value.activeModelId == null) registry.setActiveModelId(modelId)
-                            _uiState.update { state -> state.copy(models = state.models.filterNot { it.id == modelId } + installed, activeModelId = state.activeModelId ?: modelId, activeDownloadId = null, toastMessage = "Model ready: ${file.filename}") }
+                            _uiState.update { state -> state.copy(models = state.models.filterNot { it.id == modelId } + installedWithMetadata, activeModelId = state.activeModelId ?: modelId, activeDownloadId = null, toastMessage = "Model ready: ${file.filename}") }
                             updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE, DownloadState.COMPLETED, bytes = artifact?.sizeBytes ?: 0L)
                         } else {
                             _uiState.update { it.copy(activeDownloadId = null, toastMessage = "Download completed but Dora could not restore the model record") }
@@ -796,7 +804,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearToast() = _uiState.update { it.copy(toastMessage = null) }
 
-    fun exportActiveConversation(uri: Uri) {
+    fun exportActiveConversation(uri: Uri, format: ConversationExportFormat) {
         val state = _uiState.value
         val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: return
         val modelName = state.models.firstOrNull { it.id == state.activeModelId }?.name ?: "No verified model selected"
@@ -805,21 +813,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val output = getApplication<Application>().contentResolver.openOutputStream(uri)
                     ?: error("Dora could not open the selected destination")
                 output.bufferedWriter().use { writer ->
-                    writer.appendLine("# ${conversation.title}")
-                    writer.appendLine()
-                    writer.appendLine("- Model: $modelName")
-                    writer.appendLine("- Exported from Dora private local chat")
-                    writer.appendLine()
-                    conversation.messages.forEach { message ->
-                        val role = when (message.role) {
-                            MessageRole.USER -> "You"
-                            MessageRole.ASSISTANT -> "Dora"
-                            MessageRole.SYSTEM -> "System"
+                    when (format) {
+                        ConversationExportFormat.MARKDOWN -> {
+                            writer.appendLine("# ${conversation.title}")
+                            writer.appendLine()
+                            writer.appendLine("- Model: $modelName")
+                            writer.appendLine("- Exported from Dora private local chat")
+                            writer.appendLine()
+                            conversation.messages.forEach { message ->
+                                val role = when (message.role) {
+                                    MessageRole.USER -> "You"
+                                    MessageRole.ASSISTANT -> "Dora"
+                                    MessageRole.SYSTEM -> "System"
+                                }
+                                writer.appendLine("## $role")
+                                writer.appendLine()
+                                writer.appendLine(message.text)
+                                message.metrics?.let { metrics ->
+                                    writer.appendLine()
+                                    writer.appendLine("_Inference: %.1f tokens/s; %d ms first token; %d tokens generated; %d context tokens._".format(metrics.tokensPerSecond, metrics.firstTokenLatencyMillis, metrics.tokensGenerated, metrics.contextTokenEstimate))
+                                }
+                                writer.appendLine()
+                            }
                         }
-                        writer.appendLine("## $role")
-                        writer.appendLine()
-                        writer.appendLine(message.text)
-                        writer.appendLine()
+                        ConversationExportFormat.JSON -> {
+                            writer.append("{\"title\":").append(jsonEscape(conversation.title))
+                            writer.append(",\"model\":").append(jsonEscape(modelName))
+                            writer.append(",\"exportedFrom\":\"Dora private local chat\",\"messages\":[")
+                            conversation.messages.forEachIndexed { index, message ->
+                                if (index > 0) writer.append(',')
+                                writer.append("{\"role\":").append(jsonEscape(message.role.name.lowercase()))
+                                writer.append(",\"text\":").append(jsonEscape(message.text))
+                                message.metrics?.let { metrics ->
+                                    writer.append(",\"metrics\":{\"firstTokenLatencyMillis\":${metrics.firstTokenLatencyMillis},\"generationTimeMillis\":${metrics.generationTimeMillis},\"tokensGenerated\":${metrics.tokensGenerated},\"tokensPerSecond\":${metrics.tokensPerSecond},\"contextTokenEstimate\":${metrics.contextTokenEstimate}}")
+                                }
+                                writer.append('}')
+                            }
+                            writer.append("]}")
+                        }
                     }
                 }
             }
@@ -855,6 +886,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         verified = true,
                         filePath = artifact.path,
                         sizeLabel = formatBytes(artifact.sizeBytes),
+                        metadata = artifact.metadata,
                     ) else model
                 }, toastMessage = "Model ready: ${artifact.name}")
             }
@@ -931,7 +963,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     tokensGenerated = tokenCount.coerceAtLeast(estimateTokenCount(accumulated)),
                     tokensPerSecond = tokenCount.coerceAtLeast(estimateTokenCount(accumulated)) * 1_000f / elapsedMillis,
                     contextTokenEstimate = history.sumOf { estimateTokenCount(it.text) },
-                )
+                ).normalized()
                 updateLastAssistant(conversationId, accumulated, false, metrics)
                 persistLastAssistant(conversationId)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -1045,6 +1077,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun estimateTokenCount(text: String): Int = text.trim().takeIf { it.isNotEmpty() }?.split(Regex("\\s+"))?.size ?: 0
+
+    private fun jsonEscape(value: String): String = buildString {
+        append('"')
+        value.forEach { character ->
+            when (character) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> if (character.code < 0x20) append("\\u%04x".format(character.code)) else append(character)
+            }
+        }
+        append('"')
+    }
 
     private fun formatBytes(bytes: Long): String = when {
         bytes >= 1024 * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))

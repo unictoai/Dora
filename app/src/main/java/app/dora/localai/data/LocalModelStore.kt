@@ -3,6 +3,7 @@ package app.dora.localai.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import app.dora.localai.domain.ModelMetadata
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
@@ -16,6 +17,7 @@ class LocalModelStore(private val context: Context) {
         val path: String,
         val sizeBytes: Long,
         val sha256: String,
+        val metadata: ModelMetadata,
     )
 
     fun importGguf(uri: Uri): Result<ImportedArtifact> = runCatching {
@@ -32,6 +34,9 @@ class LocalModelStore(private val context: Context) {
         GgufValidator.validate(temporary).getOrElse { error ->
             throw IllegalArgumentException("The selected file is not a supported GGUF artifact: ${error.message}", error)
         }
+        val metadata = GgufMetadataReader.read(temporary).getOrElse { error ->
+            throw IllegalArgumentException("Dora could not read GGUF metadata safely: ${error.message}", error)
+        }
 
         val hash = sha256(temporary)
         val id = "import-${hash.take(16)}"
@@ -45,6 +50,7 @@ class LocalModelStore(private val context: Context) {
             path = finalFile.absolutePath,
             sizeBytes = finalFile.length(),
             sha256 = hash,
+            metadata = metadata,
         )
     }.onFailure {
         modelDirectory.listFiles { file -> file.extension == "part" }?.forEach { it.delete() }

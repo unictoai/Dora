@@ -96,6 +96,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.dora.localai.data.ConversationExportFormat
 import app.dora.localai.data.DoraStorageSummary
 import app.dora.localai.data.DoraUiState
 import app.dora.localai.data.MainViewModel
@@ -114,6 +115,7 @@ import app.dora.localai.domain.LocalModel
 import app.dora.localai.domain.MessageRole
 import app.dora.localai.domain.ModelInstallState
 import app.dora.localai.domain.ModelKind
+import app.dora.localai.domain.ModelMetadata
 import app.dora.localai.ui.DoraTheme
 
 class MainActivity : ComponentActivity() {
@@ -138,8 +140,11 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
     val documentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::importDocument)
     }
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
-        uri?.let(vm::exportActiveConversation)
+    val exportMarkdownLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
+        uri?.let { vm.exportActiveConversation(it, ConversationExportFormat.MARKDOWN) }
+    }
+    val exportJsonLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let { vm.exportActiveConversation(it, ConversationExportFormat.JSON) }
     }
     val destinations = listOf(
         DoraDestination("Chat", Icons.Default.ChatBubbleOutline),
@@ -179,12 +184,19 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
                     onBrowseModels = vm::openModelDiscovery,
                     onImportModel = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
                     onImportDocument = { documentLauncher.launch(arrayOf("text/plain", "text/markdown", "text/csv", "application/json", "application/xml")) },
-                    onExport = {
+                    onExportMarkdown = {
                         val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
                             .replace(Regex("[^A-Za-z0-9._-]+"), "_")
                             .trim('_')
                             .ifBlank { "dora-conversation" }
-                        exportLauncher.launch("$title.md")
+                        exportMarkdownLauncher.launch("$title.md")
+                    },
+                    onExportJson = {
+                        val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
+                            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+                            .trim('_')
+                            .ifBlank { "dora-conversation" }
+                        exportJsonLauncher.launch("$title.json")
                     },
                 )
                 1 -> ModelsScreen(state, vm, onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) })
@@ -249,10 +261,12 @@ private fun SetupPoint(title: String, description: String) {
 }
 
 @Composable
-private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onExport: () -> Unit) {
+private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onExportMarkdown: () -> Unit, onExportJson: () -> Unit) {
     val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: state.conversations.first()
     val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == ModelKind.TEXT && it.filePath != null && it.verified }
+    val contextEstimate = conversation.messages.sumOf { estimateTokensForUi(it.text) }
     var showSettings by remember { mutableStateOf(false) }
+    var showExportOptions by remember { mutableStateOf(false) }
     var renameConversationId by remember { mutableStateOf<String?>(null) }
     Column(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp),
@@ -261,6 +275,14 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
             Column(modifier = Modifier.weight(1f)) {
                 Text("Dora", style = MaterialTheme.typography.headlineSmall)
                 Text(activeModel?.name ?: "Explore local AI", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (activeModel != null) {
+                val limit = activeModel.metadata?.contextLength
+                Text(
+                    if (limit != null) "Context ${formatCountForUi(contextEstimate.toLong())} / ${formatCountForUi(limit)} tokens" else "Context estimate ${formatCountForUi(contextEstimate.toLong())} tokens",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             }
             LocalStatus(isGenerating = state.isGenerating)
             IconButton(onClick = vm::toggleConversationList) {
@@ -272,7 +294,7 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
             IconButton(onClick = vm::createConversation, enabled = !state.isGenerating) {
                 Icon(Icons.Default.Add, contentDescription = "New conversation")
             }
-            IconButton(onClick = onExport, enabled = !state.isGenerating && conversation.messages.isNotEmpty()) {
+            IconButton(onClick = { showExportOptions = true }, enabled = !state.isGenerating && conversation.messages.isNotEmpty()) {
                 Icon(Icons.Default.FileDownload, contentDescription = "Export conversation")
             }
             IconButton(onClick = { showSettings = true }, enabled = !state.isGenerating) {
@@ -321,6 +343,13 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
                 }
             }
         }
+    }
+    if (showExportOptions) {
+        ExportFormatDialog(
+            onDismiss = { showExportOptions = false },
+            onMarkdown = { showExportOptions = false; onExportMarkdown() },
+            onJson = { showExportOptions = false; onExportJson() },
+        )
     }
     if (showSettings) {
         GenerationSettingsDialog(
@@ -416,15 +445,34 @@ private fun ConversationListPanel(
     onRename: (String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
+    var query by remember { mutableStateOf("") }
+    val normalizedQuery = query.trim().lowercase()
+    val visibleConversations = conversations.filter { conversation ->
+        normalizedQuery.isBlank() || conversation.title.lowercase().contains(normalizedQuery) || conversation.messages.any { message -> message.text.lowercase().contains(normalizedQuery) }
+    }
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        LazyColumn(modifier = Modifier.heightIn(max = 230.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 6.dp)) {
-            items(conversations, key = { it.id }) { conversation ->
-                Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (conversation.id == activeId) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent).padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { onSelect(conversation.id) }, modifier = Modifier.weight(1f)) {
-                        Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth())
+        Column(modifier = Modifier.padding(top = 8.dp)) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                singleLine = true,
+                label = { Text("Search conversations") },
+                shape = RoundedCornerShape(14.dp),
+            )
+            if (visibleConversations.isEmpty()) {
+                Text("No matching conversations", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(14.dp))
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 230.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 6.dp)) {
+                    items(visibleConversations, key = { it.id }) { conversation ->
+                        Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (conversation.id == activeId) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent).padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { onSelect(conversation.id) }, modifier = Modifier.weight(1f)) {
+                                Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth())
+                            }
+                            IconButton(onClick = { onRename(conversation.id) }) { Icon(Icons.Default.Edit, contentDescription = "Rename conversation") }
+                            IconButton(onClick = { onDelete(conversation.id) }, enabled = conversations.size > 1) { Icon(Icons.Default.DeleteOutline, contentDescription = "Delete conversation") }
+                        }
                     }
-                    IconButton(onClick = { onRename(conversation.id) }) { Icon(Icons.Default.Edit, contentDescription = "Rename conversation") }
-                    IconButton(onClick = { onDelete(conversation.id) }, enabled = conversations.size > 1) { Icon(Icons.Default.DeleteOutline, contentDescription = "Delete conversation") }
                 }
             }
         }
@@ -432,6 +480,22 @@ private fun ConversationListPanel(
 }
 
 private fun DoraUiState.activeChatSettingsForUi() = conversationSettings[activeConversationId] ?: app.dora.localai.domain.GenerationSettings()
+
+@Composable
+private fun ExportFormatDialog(onDismiss: () -> Unit, onMarkdown: () -> Unit, onJson: () -> Unit) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Export conversation") },
+        text = { Text("Choose a portable format. JSON includes structured messages and measured inference metrics when available.") },
+        confirmButton = { TextButton(onClick = onJson) { Text("JSON") } },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = onMarkdown) { Text("Markdown") }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
+}
 
 @Composable
 private fun RenameConversationDialog(initialTitle: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
@@ -466,6 +530,17 @@ private fun GenerationSettingsDialog(
                         "Focused" to draft.copy(temperature = 0.25f, topP = 0.85f, topK = 20, maxTokens = 384),
                     ).forEach { (label, profile) ->
                         FilterChip(selected = false, onClick = { draft = profile.normalized() }, label = { Text(label) })
+                    }
+                }
+                Text("Prompt templates", style = MaterialTheme.typography.labelMedium)
+                Row(modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        "General" to "You are Dora, a concise and helpful private assistant. Be clear about uncertainty.",
+                        "Coding" to "You are a careful coding assistant. Explain assumptions, provide secure maintainable code, and call out unverified details.",
+                        "Writing" to "You are a thoughtful writing assistant. Match the requested audience and style, preserve the user’s meaning, and suggest revisions clearly.",
+                        "Q&A" to "Answer questions directly using only the available context. Distinguish facts from uncertainty and say when the answer is not known.",
+                    ).forEach { (label, prompt) ->
+                        FilterChip(selected = false, onClick = { draft = draft.copy(systemPrompt = prompt) }, label = { Text(label) })
                     }
                 }
                 OutlinedTextField(
@@ -599,6 +674,7 @@ private fun InlineMarkdownText(text: String, modifier: Modifier = Modifier) {
 @Composable
 private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit) {
     val models = state.models.filter { it.kind == ModelKind.TEXT }
+    var selectedModel by remember { mutableStateOf<LocalModel?>(null) }
     val downloadJobs = state.jobs.filter { it.kind == JobKind.DOWNLOAD }
     val visibleCandidates = when (state.catalogFilter) {
         CatalogFilter.ALL -> state.huggingFaceCandidates
@@ -674,7 +750,7 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
                 }
             }
             item { Text("On this device", style = MaterialTheme.typography.titleMedium) }
-            items(models, key = { it.id }) { model -> ModelCard(model, vm, model.id == state.activeModelId) }
+            items(models, key = { it.id }) { model -> ModelCard(model, vm, model.id == state.activeModelId, onDetails = { selectedModel = model }) }
             if (visibleCandidates.isNotEmpty()) {
                 item { Text("Suggested for this device", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp)) }
                 items(visibleCandidates, key = { it.repoId }) { candidate -> HuggingFaceCandidateCard(candidate, vm, state.activeDownloadId) }
@@ -684,6 +760,9 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
                 }
             }
         }
+    }
+    selectedModel?.let { model ->
+        ModelDetailDialog(model = model, onDismiss = { selectedModel = null })
     }
 }
 
@@ -906,7 +985,7 @@ private fun formatBytesForUi(bytes: Long): String = when {
 }
 
 @Composable
-private fun ModelCard(model: LocalModel, vm: MainViewModel, isActive: Boolean) {
+private fun ModelCard(model: LocalModel, vm: MainViewModel, isActive: Boolean, onDetails: () -> Unit) {
     val imported = model.installState == ModelInstallState.INSTALLED && model.filePath != null && model.verified
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -924,6 +1003,7 @@ private fun ModelCard(model: LocalModel, vm: MainViewModel, isActive: Boolean) {
                         color = if (model.installState == ModelInstallState.INVALID) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                IconButton(onClick = onDetails) { Icon(Icons.Default.Info, contentDescription = "Model details") }
                 if (imported) Icon(Icons.Default.CheckCircle, contentDescription = "Ready", tint = Color(0xFF34A853))
                 if (model.installState == ModelInstallState.INVALID) Icon(Icons.Default.ErrorOutline, contentDescription = "Invalid model", tint = MaterialTheme.colorScheme.error)
             }
@@ -942,7 +1022,51 @@ private fun ModelCard(model: LocalModel, vm: MainViewModel, isActive: Boolean) {
 }
 
 @Composable
+private fun ModelDetailDialog(model: LocalModel, onDismiss: () -> Unit) {
+    val metadata = model.metadata
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(model.name) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DetailLine("Status", if (model.verified) "Verified local GGUF" else "Not verified")
+                DetailLine("Publisher", model.publisher)
+                DetailLine("Format", model.format)
+                DetailLine("Size", model.sizeLabel)
+                DetailLine("License", model.license)
+                metadata?.architecture?.let { DetailLine("Architecture", it) }
+                metadata?.quantization?.let { DetailLine("Quantization", it) }
+                metadata?.parameterCount?.let { DetailLine("Parameters", formatParameterCount(it)) }
+                metadata?.contextLength?.let { DetailLine("Context length", "${formatCountForUi(it)} tokens") }
+                metadata?.blockCount?.let { DetailLine("Layers", it.toString()) }
+                metadata?.embeddingLength?.let { DetailLine("Embedding length", it.toString()) }
+                metadata?.vocabularySize?.let { DetailLine("Vocabulary", formatCountForUi(it)) }
+                if (metadata == null) Text("GGUF metadata is unavailable for this model.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
+}
+
+@Composable
+private fun DetailLine(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.End, modifier = Modifier.padding(start = 12.dp))
+    }
+}
+
+private fun formatParameterCount(value: Long): String = when {
+    value >= 1_000_000_000L -> "%.1fB".format(value / 1_000_000_000.0)
+    value >= 1_000_000L -> "%.1fM".format(value / 1_000_000.0)
+    else -> value.toString()
+}
+
+private fun estimateTokensForUi(text: String): Int = text.trim().takeIf { it.isNotEmpty() }?.split(Regex("\\s+"))?.size ?: 0
+
+@Composable
 private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
+    var showDiagnostics by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
         ScreenHeader("Settings", "Simple controls for a private local app.")
         Spacer(Modifier.height(16.dp))
@@ -972,12 +1096,36 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
             "${formatBytesForUi(state.storageSummary.availableBytes)} available of ${formatBytesForUi(state.storageSummary.totalBytes)} • ${formatBytesForUi(state.storageSummary.modelBytes)} models • ${formatBytesForUi(state.storageSummary.temporaryDownloadBytes)} temporary downloads • ${state.storageSummary.orphanedFileCount} orphaned files",
         )
         HorizontalDivider()
-        SettingRow(Icons.Default.Info, "Runtime", state.runtimeNotice)
+        SettingRow(Icons.Default.Info, "Runtime", state.runtimeNotice, trailing = { TextButton(onClick = { showDiagnostics = true }) { Text("Details") } })
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
         Spacer(Modifier.height(12.dp))
-        Text("Dora 0.8.0 pre-alpha", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Text("Dora ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
+    if (showDiagnostics) DiagnosticsDialog(state = state, onDismiss = { showDiagnostics = false })
+}
+
+@Composable
+private fun DiagnosticsDialog(state: DoraUiState, onDismiss: () -> Unit) {
+    val activeModel = state.models.firstOrNull { it.id == state.activeModelId }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Dora diagnostics") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                DetailLine("App", BuildConfig.VERSION_NAME)
+                DetailLine("ABI", android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "Unknown")
+                DetailLine("Android", android.os.Build.VERSION.RELEASE ?: "Unknown")
+                DetailLine("Runtime", state.nativeRuntimeVersion)
+                DetailLine("Bridge", if (state.runtimeNotice.startsWith("Native llama.cpp bridge loaded")) "Available" else "Unavailable")
+                DetailLine("Active model", activeModel?.name ?: "None")
+                DetailLine("Models", state.models.count { it.installState == ModelInstallState.INSTALLED && it.verified }.toString())
+                DetailLine("Documents", state.documents.size.toString())
+                Text("Dora intentionally reports unavailable capabilities rather than simulating them. Image generation, voice, vision, cloud inference, plugins, MCP, and tool execution are not shipped.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
 }
 
 @Composable
