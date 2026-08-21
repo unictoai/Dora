@@ -12,10 +12,12 @@ import androidx.work.WorkManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.dora.localai.DoraApplication
+import app.dora.localai.domain.CatalogFilter
 import app.dora.localai.domain.ChatMessage
 import app.dora.localai.domain.DownloadProgress
 import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.DeviceFitLevel
+import app.dora.localai.domain.GenerationSettings
 import app.dora.localai.domain.HuggingFaceCandidate
 import app.dora.localai.domain.HuggingFaceFileCandidate
 import app.dora.localai.domain.Conversation
@@ -73,6 +75,7 @@ private val imageModel = LocalModel(
 data class DoraUiState(
     val selectedTab: Int = 0,
     val models: List<LocalModel> = listOf(starterTextModel, imageModel),
+    val activeModelId: String? = null,
     val conversations: List<Conversation> = listOf(Conversation(title = "New local conversation")),
     val activeConversationId: String = "",
     val composerText: String = "",
@@ -85,11 +88,17 @@ data class DoraUiState(
     val deviceSummary: String = "Device profile pending",
     val huggingFaceQuery: String = "",
     val huggingFaceCandidates: List<HuggingFaceCandidate> = emptyList(),
+    val catalogFilter: CatalogFilter = CatalogFilter.ALL,
     val isSearchingHuggingFace: Boolean = false,
     val activeDownloadId: String? = null,
     val expandedDownloadId: String? = null,
+    val showConversationList: Boolean = false,
+    val conversationSettings: Map<String, GenerationSettings> = emptyMap(),
     val storageSummary: DoraStorageSummary = DoraStorageSummary(),
 )
+
+private val DoraUiState.activeChatSettings: GenerationSettings
+    get() = conversationSettings[activeConversationId] ?: GenerationSettings()
 
 data class DoraStorageSummary(
     val totalBytes: Long = 0L,
@@ -148,8 +157,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 filePath = artifact.path,
             )
         }
+        val allModels = builtInModels + downloadedModels
+        val restoredActiveModel = registry.activeModelId()?.takeIf { id -> allModels.any { it.id == id && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.installState == app.dora.localai.domain.ModelInstallState.INSTALLED && it.verified && it.filePath != null } }
+        val fallbackActiveModel = allModels.firstOrNull { it.kind == app.dora.localai.domain.ModelKind.TEXT && it.installState == app.dora.localai.domain.ModelInstallState.INSTALLED && it.verified && it.filePath != null }?.id
         return DoraUiState(
-            models = builtInModels + downloadedModels,
+            models = allModels,
+            activeModelId = restoredActiveModel ?: fallbackActiveModel,
             isOfflineOnly = registry.isOfflineOnly(),
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
             deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
@@ -160,6 +173,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         val conversation = _uiState.value.conversations.first()
         _uiState.update { it.copy(activeConversationId = conversation.id) }
+        viewModelScope.launch(Dispatchers.IO) { loadConversations() }
         viewModelScope.launch {
             dao.observeJobs().collect { records ->
                 _uiState.update { state -> state.copy(jobs = records.map(::toDoraJob)) }
@@ -257,6 +271,127 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private suspend fun loadConversations() {
+        val records = dao.allConversations()
+        val restored = records.map { record ->
+            Conversation(
+                id = record.id,
+                title = record.title,
+                messages = dao.messagesForConversation(record.id).map { message ->
+                    ChatMessage(
+                        id = message.id,
+                        role = runCatching { MessageRole.valueOf(message.role) }.getOrDefault(MessageRole.ASSISTANT),
+                        text = message.text,
+                    )
+                },
+            )
+        }
+        if (restored.isEmpty()) {
+            val fresh = _uiState.value.conversations.first()
+            persistConversation(fresh, GenerationSettings())
+            return
+        }
+        val settings = records.associate { record ->
+            record.id to GenerationSettings(
+                systemPrompt = record.systemPrompt,
+                maxTokens = record.maxTokens,
+                threads = record.threads,
+                temperature = record.temperature,
+                topK = record.topK,
+                topP = record.topP,
+            ).normalized()
+        }
+        _uiState.update { state ->
+            state.copy(
+                conversations = restored,
+                activeConversationId = restored.first().id,
+                conversationSettings = settings,
+            )
+        }
+    }
+
+    private fun persistConversation(conversation: Conversation, settings: GenerationSettings) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            val normalized = settings.normalized()
+            dao.upsertConversation(
+                ConversationRecord(
+                    id = conversation.id,
+                    title = conversation.title,
+                    createdAt = now,
+                    updatedAt = now,
+                    systemPrompt = normalized.systemPrompt,
+                    maxTokens = normalized.maxTokens,
+                    threads = normalized.threads,
+                    temperature = normalized.temperature,
+                    topK = normalized.topK,
+                    topP = normalized.topP,
+                ),
+            )
+        }
+    }
+
+    fun toggleConversationList() = _uiState.update { it.copy(showConversationList = !it.showConversationList) }
+
+    fun selectConversation(id: String) {
+        if (_uiState.value.conversations.any { it.id == id }) {
+            _uiState.update { it.copy(activeConversationId = id, showConversationList = false) }
+        }
+    }
+
+    fun createConversation() {
+        val conversation = Conversation(title = "New local conversation")
+        val settings = GenerationSettings()
+        _uiState.update { state ->
+            state.copy(
+                conversations = listOf(conversation) + state.conversations,
+                activeConversationId = conversation.id,
+                conversationSettings = state.conversationSettings + (conversation.id to settings),
+                showConversationList = false,
+                toastMessage = "New private conversation",
+            )
+        }
+        persistConversation(conversation, settings)
+    }
+
+    fun renameConversation(id: String, title: String) {
+        val cleanTitle = title.trim().take(80).ifBlank { "Untitled conversation" }
+        _uiState.update { state ->
+            state.copy(conversations = state.conversations.map { if (it.id == id) it.copy(title = cleanTitle) else it })
+        }
+        val conversation = _uiState.value.conversations.firstOrNull { it.id == id } ?: return
+        persistConversation(conversation, _uiState.value.conversationSettings[id] ?: GenerationSettings())
+    }
+
+    fun deleteConversation(id: String) {
+        if (_uiState.value.conversations.size <= 1) {
+            _uiState.update { it.copy(toastMessage = "Keep one conversation available for local chat") }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.deleteMessagesForConversation(id)
+            dao.deleteConversation(id)
+        }
+        _uiState.update { state ->
+            val remaining = state.conversations.filterNot { it.id == id }
+            state.copy(
+                conversations = remaining,
+                activeConversationId = if (state.activeConversationId == id) remaining.first().id else state.activeConversationId,
+                conversationSettings = state.conversationSettings - id,
+                showConversationList = false,
+                toastMessage = "Conversation deleted from this device",
+            )
+        }
+    }
+
+    fun updateGenerationSettings(settings: GenerationSettings) {
+        val id = _uiState.value.activeConversationId
+        val normalized = settings.normalized()
+        _uiState.update { state -> state.copy(conversationSettings = state.conversationSettings + (id to normalized)) }
+        val conversation = _uiState.value.conversations.firstOrNull { it.id == id } ?: return
+        persistConversation(conversation, normalized)
+    }
+
     fun selectTab(tab: Int) = _uiState.update { it.copy(selectedTab = tab, toastMessage = null) }
 
     fun toggleDownloadDetails(downloadId: String) = _uiState.update { state ->
@@ -281,9 +416,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setComposerText(value: String) = _uiState.update { it.copy(composerText = value) }
 
+    fun selectActiveModel(modelId: String) {
+        val model = _uiState.value.models.firstOrNull { it.id == modelId }
+        if (model?.kind != app.dora.localai.domain.ModelKind.TEXT || model.filePath.isNullOrBlank() || !model.verified) {
+            _uiState.update { it.copy(toastMessage = "Only verified local text models can be active") }
+            return
+        }
+        registry.setActiveModelId(modelId)
+        _uiState.update { it.copy(activeModelId = modelId, toastMessage = "Active model: ${model.name}") }
+    }
+
     fun setImagePrompt(value: String) = _uiState.update { it.copy(imagePrompt = value) }
 
     fun setHuggingFaceQuery(value: String) = _uiState.update { it.copy(huggingFaceQuery = value) }
+
+    fun setCatalogFilter(filter: CatalogFilter) = _uiState.update { it.copy(catalogFilter = filter) }
 
     fun browseHuggingFace() {
         val query = _uiState.value.huggingFaceQuery.trim().ifBlank { "gguf" }
@@ -397,7 +544,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val artifact = registry.artifact(modelId)
                         val installed = artifact?.let { model.copy(installState = app.dora.localai.domain.ModelInstallState.INSTALLED, verified = true, filePath = it.path) }
                         if (installed != null) {
-                            _uiState.update { state -> state.copy(models = state.models.filterNot { it.id == modelId } + installed, activeDownloadId = null, toastMessage = "Model ready: ${file.filename}") }
+                            if (_uiState.value.activeModelId == null) registry.setActiveModelId(modelId)
+                            _uiState.update { state -> state.copy(models = state.models.filterNot { it.id == modelId } + installed, activeModelId = state.activeModelId ?: modelId, activeDownloadId = null, toastMessage = "Model ready: ${file.filename}") }
                             updateDownloadJob(job.id, 1f, "Validated and ready for local chat", JobState.COMPLETE, DownloadState.COMPLETED, bytes = artifact?.sizeBytes ?: 0L)
                         } else {
                             _uiState.update { it.copy(activeDownloadId = null, toastMessage = "Download completed but Dora could not restore the model record") }
@@ -538,6 +686,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAllLocalData() {
         registry.clearAll()
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.deleteAllMessages()
+            dao.deleteAllConversations()
+        }
         val freshConversation = Conversation(title = "New local conversation")
         _uiState.value = DoraUiState(
             conversations = listOf(freshConversation),
@@ -547,6 +699,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearToast() = _uiState.update { it.copy(toastMessage = null) }
+
+    fun exportActiveConversation(uri: Uri) {
+        val state = _uiState.value
+        val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: return
+        val modelName = state.models.firstOrNull { it.id == state.activeModelId }?.name ?: "No verified model selected"
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val output = getApplication<Application>().contentResolver.openOutputStream(uri)
+                    ?: error("Dora could not open the selected destination")
+                output.bufferedWriter().use { writer ->
+                    writer.appendLine("# ${conversation.title}")
+                    writer.appendLine()
+                    writer.appendLine("- Model: $modelName")
+                    writer.appendLine("- Exported from Dora private local chat")
+                    writer.appendLine()
+                    conversation.messages.forEach { message ->
+                        val role = when (message.role) {
+                            MessageRole.USER -> "You"
+                            MessageRole.ASSISTANT -> "Dora"
+                            MessageRole.SYSTEM -> "System"
+                        }
+                        writer.appendLine("## $role")
+                        writer.appendLine()
+                        writer.appendLine(message.text)
+                        writer.appendLine()
+                    }
+                }
+            }
+            withContext(Dispatchers.Main) {
+                _uiState.update { it.copy(toastMessage = result.fold({ "Conversation exported" }, { "Export failed: ${it.message ?: "could not write file"}" })) }
+            }
+        }
+    }
 
     fun importGguf(uri: Uri) {
         viewModelScope.launch {
@@ -565,6 +750,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             registry.setArtifact(LocalRegistry.StoredArtifact(starterTextModel.id, artifact.name, artifact.path, artifact.sizeBytes, artifact.sha256))
+            registry.setActiveModelId(starterTextModel.id)
             _uiState.update { state ->
                 state.copy(models = state.models.map { model ->
                     if (model.id == starterTextModel.id) model.copy(
@@ -593,11 +779,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteModel(modelId: String) {
         modelStore.delete(_uiState.value.models.firstOrNull { it.id == modelId }?.filePath)
+        if (registry.activeModelId() == modelId) registry.setActiveModelId(null)
         registry.setModelInstalled(modelId, false)
         _uiState.update { state ->
-            state.copy(models = state.models.map { model ->
-                if (model.id == modelId) model.copy(installState = app.dora.localai.domain.ModelInstallState.AVAILABLE) else model
-            }, toastMessage = "Model removed from Dora")
+                            state.copy(models = state.models.map { model ->
+                    if (model.id == modelId) model.copy(installState = app.dora.localai.domain.ModelInstallState.AVAILABLE, filePath = null, verified = false) else model
+                }, activeModelId = if (state.activeModelId == modelId) null else state.activeModelId, toastMessage = "Model removed from Dora")
+
         }
     }
 
@@ -605,29 +793,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val prompt = _uiState.value.composerText.trim()
         if (prompt.isBlank() || _uiState.value.isGenerating) return
         val conversationId = _uiState.value.activeConversationId
+        val currentConversation = _uiState.value.conversations.firstOrNull { it.id == conversationId } ?: return
         val userMessage = ChatMessage(role = MessageRole.USER, text = prompt)
         val assistantMessage = ChatMessage(role = MessageRole.ASSISTANT, text = "", isPartial = true)
+        if (currentConversation.messages.isEmpty()) {
+            val title = prompt.replace(Regex("\\s+"), " ").take(42).ifBlank { "New local conversation" }
+            updateConversation(conversationId) { it.copy(title = title) }
+        }
         updateConversation(conversationId) { conversation ->
             conversation.copy(messages = conversation.messages + userMessage + assistantMessage)
         }
+        persistMessage(conversationId, userMessage, currentConversation.messages.size.toLong())
+        persistMessage(conversationId, assistantMessage, currentConversation.messages.size.toLong() + 1L)
+        val settings = _uiState.value.activeChatSettings.normalized()
         _uiState.update { it.copy(composerText = "", isGenerating = true, toastMessage = null) }
 
         generationJob?.cancel()
         generationJob = viewModelScope.launch {
             try {
                 val conversation = _uiState.value.conversations.first { it.id == conversationId }
-                val activeModel = _uiState.value.models.firstOrNull { it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null }
+                val activeModel = _uiState.value.models.firstOrNull { it.id == _uiState.value.activeModelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null && it.verified }
                 val engine = if (activeModel != null && nativeTextEngine.isProductionReady) nativeTextEngine else textEngine
+                val history = if (settings.systemPrompt.isBlank()) conversation.messages else listOf(ChatMessage(role = MessageRole.SYSTEM, text = settings.systemPrompt)) + conversation.messages
                 var accumulated = ""
-                engine.streamReply(activeModel ?: starterTextModel, conversation.messages).collect { token ->
+                engine.streamReply(activeModel ?: starterTextModel, history, settings).collect { token ->
                     accumulated += token
                     updateLastAssistant(conversationId, accumulated, true)
                 }
                 updateLastAssistant(conversationId, accumulated, false)
+                persistLastAssistant(conversationId)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
                 updateLastAssistant(conversationId, "Dora could not complete this local generation: ${error.message ?: "native runtime error"}", false)
+                persistLastAssistant(conversationId)
                 _uiState.update { it.copy(toastMessage = "Local generation failed") }
             } finally {
                 _uiState.update { it.copy(isGenerating = false) }
@@ -643,7 +842,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val id = _uiState.value.activeConversationId
         val conversation = _uiState.value.conversations.firstOrNull { it.id == id } ?: return
         val last = conversation.messages.lastOrNull()
-        if (last?.role == MessageRole.ASSISTANT) updateLastAssistant(id, last.text, false)
+        if (last?.role == MessageRole.ASSISTANT) {
+            updateLastAssistant(id, last.text, false)
+            persistLastAssistant(id)
+        }
     }
 
     fun generateImage() {
@@ -669,6 +871,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    private fun persistMessage(conversationId: String, message: ChatMessage, ordinal: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.upsertMessage(
+                MessageRecord(
+                    id = message.id,
+                    conversationId = conversationId,
+                    role = message.role.name,
+                    text = message.text,
+                    ordinal = ordinal,
+                    createdAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+
+    private fun persistLastAssistant(conversationId: String) {
+        val conversation = _uiState.value.conversations.firstOrNull { it.id == conversationId } ?: return
+        val index = conversation.messages.indexOfLast { it.role == MessageRole.ASSISTANT }
+        val message = conversation.messages.getOrNull(index) ?: return
+        persistMessage(conversationId, message, index.toLong())
+        persistConversation(conversation, _uiState.value.conversationSettings[conversationId] ?: GenerationSettings())
     }
 
     private fun updateConversation(id: String, transform: (Conversation) -> Conversation) {

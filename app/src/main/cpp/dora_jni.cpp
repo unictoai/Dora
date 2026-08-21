@@ -2,6 +2,7 @@
 #include <android/log.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -70,7 +71,10 @@ Java_app_dora_localai_engine_NativeLlamaEngine_nativeGenerate(
     jstring model_path,
     jstring prompt,
     jint max_tokens,
-    jint threads
+    jint threads,
+    jfloat temperature,
+    jint top_k,
+    jfloat top_p
 ) {
     ensure_backend();
     std::unique_lock<std::mutex> runtime_lock(runtime_mutex, std::try_to_lock);
@@ -129,7 +133,19 @@ Java_app_dora_localai_engine_NativeLlamaEngine_nativeGenerate(
 
     auto sampler_params = llama_sampler_chain_default_params();
     llama_sampler * sampler = llama_sampler_chain_init(sampler_params);
-    llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
+    if (sampler == nullptr) {
+        llama_free(context);
+        llama_model_free(model);
+        return string_to_jstring(env, "Dora native error: sampler could not be created.");
+    }
+    const float safe_temperature = temperature > 0.0f ? temperature : 0.7f;
+    const int32_t safe_top_k = top_k > 0 ? top_k : 40;
+    const float safe_top_p = top_p > 0.0f && top_p <= 1.0f ? top_p : 0.95f;
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(safe_top_k));
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(safe_top_p, 1));
+    llama_sampler_chain_add(sampler, llama_sampler_init_temp(safe_temperature));
+    const auto seed = static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
 
     std::string output;
     const int limit = max_tokens > 0 ? max_tokens : 256;

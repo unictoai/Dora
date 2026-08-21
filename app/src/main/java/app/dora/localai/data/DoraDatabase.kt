@@ -3,6 +3,7 @@ package app.dora.localai.data
 import android.content.Context
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -27,6 +28,30 @@ data class ModelRecord(
     val sourceRevision: String? = null,
     val sourceUrl: String? = null,
     val sourceLicense: String? = null,
+)
+
+@Entity(tableName = "conversation_records")
+data class ConversationRecord(
+    @androidx.room.PrimaryKey val id: String,
+    val title: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val systemPrompt: String,
+    val maxTokens: Int,
+    val threads: Int,
+    val temperature: Float,
+    val topK: Int,
+    val topP: Float,
+)
+
+@Entity(tableName = "message_records", indices = [Index(value = ["conversationId"])])
+data class MessageRecord(
+    @androidx.room.PrimaryKey val id: String,
+    val conversationId: String,
+    val role: String,
+    val text: String,
+    val ordinal: Long,
+    val createdAt: Long,
 )
 
 @Entity(tableName = "job_records")
@@ -90,9 +115,33 @@ interface DoraDao {
 
     @Query("DELETE FROM job_records WHERE id = :id")
     suspend fun deleteJob(id: String)
+
+    @Query("SELECT * FROM conversation_records ORDER BY updatedAt DESC")
+    suspend fun allConversations(): List<ConversationRecord>
+
+    @Query("SELECT * FROM message_records WHERE conversationId = :conversationId ORDER BY ordinal ASC")
+    suspend fun messagesForConversation(conversationId: String): List<MessageRecord>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertConversation(record: ConversationRecord)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMessage(record: MessageRecord)
+
+    @Query("DELETE FROM message_records WHERE conversationId = :conversationId")
+    suspend fun deleteMessagesForConversation(conversationId: String)
+
+    @Query("DELETE FROM conversation_records WHERE id = :id")
+    suspend fun deleteConversation(id: String)
+
+    @Query("DELETE FROM message_records")
+    suspend fun deleteAllMessages()
+
+    @Query("DELETE FROM conversation_records")
+    suspend fun deleteAllConversations()
 }
 
-@Database(entities = [ModelRecord::class, JobRecord::class], version = 3, exportSchema = true)
+@Database(entities = [ModelRecord::class, JobRecord::class, ConversationRecord::class, MessageRecord::class], version = 4, exportSchema = true)
 abstract class DoraDatabase : RoomDatabase() {
     abstract fun dao(): DoraDao
 
@@ -133,9 +182,17 @@ abstract class DoraDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS conversation_records (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, systemPrompt TEXT NOT NULL, maxTokens INTEGER NOT NULL, threads INTEGER NOT NULL, temperature REAL NOT NULL, topK INTEGER NOT NULL, topP REAL NOT NULL)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS message_records (id TEXT NOT NULL PRIMARY KEY, conversationId TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, ordinal INTEGER NOT NULL, createdAt INTEGER NOT NULL)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_message_records_conversationId ON message_records (conversationId)")
+            }
+        }
+
         fun get(context: Context): DoraDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, DoraDatabase::class.java, "dora.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
                 .also { instance = it }
         }

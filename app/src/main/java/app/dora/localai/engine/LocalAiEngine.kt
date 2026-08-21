@@ -1,6 +1,7 @@
 package app.dora.localai.engine
 
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.GenerationSettings
 import app.dora.localai.domain.LocalModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -9,7 +10,7 @@ import kotlinx.coroutines.flow.flow
 interface TextInferenceEngine {
     val displayName: String
     val isProductionReady: Boolean
-    fun streamReply(model: LocalModel, history: List<ChatMessage>): Flow<String>
+    fun streamReply(model: LocalModel, history: List<ChatMessage>, settings: GenerationSettings = GenerationSettings()): Flow<String>
 }
 
 interface ImageInferenceEngine {
@@ -27,7 +28,7 @@ class DoraDemoTextEngine : TextInferenceEngine {
     override val displayName: String = "Dora offline demo engine"
     override val isProductionReady: Boolean = false
 
-    override fun streamReply(model: LocalModel, history: List<ChatMessage>): Flow<String> = flow {
+    override fun streamReply(model: LocalModel, history: List<ChatMessage>, settings: GenerationSettings): Flow<String> = flow {
         val prompt = history.lastOrNull { it.role.name == "USER" }?.text.orEmpty()
         val response = if (prompt.isBlank()) {
             "Dora is ready. Add a local model to connect a production runtime."

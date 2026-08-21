@@ -24,6 +24,14 @@ class LocalRegistry(context: Context) {
         prefs.edit().putBoolean(KEY_OFFLINE_ONLY, value).apply()
     }
 
+    fun activeModelId(): String? = prefs.getString(KEY_ACTIVE_MODEL, null)
+
+    fun setActiveModelId(modelId: String?) {
+        prefs.edit().apply {
+            if (modelId.isNullOrBlank()) remove(KEY_ACTIVE_MODEL) else putString(KEY_ACTIVE_MODEL, modelId)
+        }.apply()
+    }
+
     fun installedModelIds(): Set<String> = prefs.getStringSet(KEY_INSTALLED_MODELS, emptySet()).orEmpty()
 
     fun setModelInstalled(modelId: String, installed: Boolean) {
@@ -86,6 +94,7 @@ class LocalRegistry(context: Context) {
     private companion object {
         const val KEY_OFFLINE_ONLY = "offline_only"
         const val KEY_INSTALLED_MODELS = "installed_models"
+        const val KEY_ACTIVE_MODEL = "active_model"
         const val KEY_INVALID_ARTIFACTS = "invalid_artifacts"
     }
 }

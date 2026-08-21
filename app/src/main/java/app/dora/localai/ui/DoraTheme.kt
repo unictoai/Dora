@@ -9,41 +9,48 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 
-private val DoraAccent = Color(0xFF4F46E5)
-private val DoraInk = Color(0xFF171717)
-private val DoraMuted = Color(0xFF737373)
-private val DoraCanvas = Color(0xFFF7F7F8)
+private val DoraAccent = Color(0xFF3857D6)
+private val DoraTeal = Color(0xFF007F78)
+private val DoraInk = Color(0xFF15161A)
+private val DoraMuted = Color(0xFF69707D)
+private val DoraCanvas = Color(0xFFF5F7FB)
 private val DoraSurface = Color(0xFFFFFFFF)
-private val DoraDivider = Color(0xFFE5E5E7)
+private val DoraDivider = Color(0xFFDDE2EC)
 
 private val LightColors = lightColorScheme(
     primary = DoraAccent,
     onPrimary = Color.White,
-    secondary = Color(0xFF52525B),
+    secondary = DoraTeal,
     onSecondary = Color.White,
+    tertiary = Color(0xFF8B4A00),
+    onTertiary = Color.White,
     background = DoraCanvas,
     onBackground = DoraInk,
     surface = DoraSurface,
     onSurface = DoraInk,
-    surfaceVariant = Color(0xFFF0F0F2),
+    surfaceVariant = Color(0xFFEDF1F8),
     onSurfaceVariant = DoraMuted,
     outline = DoraDivider,
+    outlineVariant = Color(0xFFE9EDF5),
     error = Color(0xFFB42318),
 )
 
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFFA5B4FC),
-    onPrimary = Color(0xFF1E1B4B),
-    secondary = Color(0xFFA1A1AA),
-    onSecondary = Color(0xFF18181B),
-    background = Color(0xFF101010),
-    onBackground = Color(0xFFF5F5F5),
-    surface = Color(0xFF191919),
-    onSurface = Color(0xFFF5F5F5),
-    surfaceVariant = Color(0xFF242424),
-    onSurfaceVariant = Color(0xFFA3A3A3),
-    outline = Color(0xFF3F3F46),
-    error = Color(0xFFF97066),
+    primary = Color(0xFFB9C5FF),
+    onPrimary = Color(0xFF17275F),
+    secondary = Color(0xFF63D7CA),
+    onSecondary = Color(0xFF003733),
+    tertiary = Color(0xFFFFB873),
+    onTertiary = Color(0xFF4D2600),
+    background = Color(0xFF0D1118),
+    onBackground = Color(0xFFE9EDF5),
+    surface = Color(0xFF151A22),
+    onSurface = Color(0xFFE9EDF5),
+    surfaceVariant = Color(0xFF202834),
+    onSurfaceVariant = Color(0xFFB2BBC9),
+    outline = Color(0xFF3B4656),
+    outlineVariant = Color(0xFF293342),
+    error = Color(0xFFFFB4AB),
 )
 
 private val DoraTypography = Typography().run {
@@ -52,7 +59,9 @@ private val DoraTypography = Typography().run {
         headlineMedium = headlineMedium.copy(fontWeight = FontWeight.Bold),
         titleLarge = titleLarge.copy(fontWeight = FontWeight.SemiBold),
         titleMedium = titleMedium.copy(fontWeight = FontWeight.SemiBold),
+        labelLarge = labelLarge.copy(fontWeight = FontWeight.SemiBold),
         bodyLarge = bodyLarge.copy(lineHeight = bodyLarge.fontSize * 1.45f),
+        bodyMedium = bodyMedium.copy(lineHeight = bodyMedium.fontSize * 1.35f),
     )
 }
 

@@ -1,6 +1,7 @@
 package app.dora.localai.engine
 
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.GenerationSettings
 import app.dora.localai.domain.LocalModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -58,13 +59,29 @@ object NativeLlamaEngine {
         }
     }
 
-    fun generate(path: String, prompt: String, maxTokens: Int = 256, threads: Int = 4): String {
+    fun generate(
+        path: String,
+        prompt: String,
+        maxTokens: Int = 256,
+        threads: Int = 4,
+        temperature: Float = 0.7f,
+        topK: Int = 40,
+        topP: Float = 0.95f,
+    ): String {
         check(path.isNotBlank()) { "A validated model path is required." }
         check(prompt.isNotBlank()) { "A non-empty prompt is required." }
         check(isAvailable()) { "The native llama.cpp library is unavailable on this device." }
         check(inferenceGate.tryAcquire()) { "Dora is already running one local inference job." }
         return try {
-            nativeGenerate(path, prompt, maxTokens.coerceIn(1, 4096), threads.coerceIn(1, 16))
+            nativeGenerate(
+                path,
+                prompt,
+                maxTokens.coerceIn(16, 4096),
+                threads.coerceIn(1, 16),
+                temperature.coerceIn(0.05f, 2.0f),
+                topK.coerceIn(1, 256),
+                topP.coerceIn(0.05f, 1.0f),
+            )
         } finally {
             inferenceGate.release()
         }
@@ -73,7 +90,7 @@ object NativeLlamaEngine {
     private external fun nativeVersion(): String
     private external fun nativeValidateModel(path: String): Boolean
     private external fun nativeCancel()
-    private external fun nativeGenerate(path: String, prompt: String, maxTokens: Int, threads: Int): String
+    private external fun nativeGenerate(path: String, prompt: String, maxTokens: Int, threads: Int, temperature: Float, topK: Int, topP: Float): String
 }
 
 class NativeStableDiffusionImageEngine : ImageInferenceEngine {
@@ -89,12 +106,28 @@ class NativeLlamaTextEngine : TextInferenceEngine {
     override val isProductionReady: Boolean
         get() = NativeLlamaEngine.isAvailable()
 
-    override fun streamReply(model: LocalModel, history: List<ChatMessage>): Flow<String> = flow {
+    override fun streamReply(model: LocalModel, history: List<ChatMessage>, settings: GenerationSettings): Flow<String> = flow {
         val path = model.filePath ?: throw UnsupportedOperationException("A validated GGUF file path is required.")
-        val prompt = history.joinToString("\n") { message ->
-            val role = if (message.role.name == "USER") "User" else "Assistant"
-            "$role: ${message.text}"
+        val normalized = settings.normalized()
+        val prompt = buildString {
+            if (normalized.systemPrompt.isNotBlank()) append("System: ${normalized.systemPrompt}\n")
+            history.joinTo(this, separator = "\n") { message ->
+                val role = when (message.role) {
+                    app.dora.localai.domain.MessageRole.USER -> "User"
+                    app.dora.localai.domain.MessageRole.ASSISTANT -> "Assistant"
+                    app.dora.localai.domain.MessageRole.SYSTEM -> "System"
+                }
+                "$role: ${message.text}"
+            }
         }
-        emit(NativeLlamaEngine.generate(path = path, prompt = prompt))
+        emit(NativeLlamaEngine.generate(
+            path = path,
+            prompt = prompt,
+            maxTokens = normalized.maxTokens,
+            threads = normalized.threads,
+            temperature = normalized.temperature,
+            topK = normalized.topK,
+            topP = normalized.topP,
+        ))
     }.flowOn(Dispatchers.Default)
 }

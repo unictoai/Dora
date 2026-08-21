@@ -1,6 +1,7 @@
 package app.dora.localai.engine
 
 import app.dora.localai.domain.ChatMessage
+import app.dora.localai.domain.GenerationSettings
 import app.dora.localai.domain.LocalModel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -17,7 +18,7 @@ class LlamaCppTextEngine : TextInferenceEngine {
     override val displayName: String = "llama.cpp / GGUF"
     override val isProductionReady: Boolean = false
 
-    override fun streamReply(model: LocalModel, history: List<ChatMessage>): Flow<String> = flow {
+    override fun streamReply(model: LocalModel, history: List<ChatMessage>, settings: GenerationSettings): Flow<String> = flow {
         throw UnsupportedOperationException(
             "The llama.cpp JNI bridge is not bundled yet. Run the Dora feasibility benchmark before enabling this adapter."
         )

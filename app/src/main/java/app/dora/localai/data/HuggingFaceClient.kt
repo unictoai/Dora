@@ -66,9 +66,16 @@ class HuggingFaceClient(private val deviceProfile: DeviceProfile) {
         val root = readJsonObject("$BASE_URL/api/models/${encodePath(repoId)}?blobs=true&files_metadata=true")
         val siblings = root.optJSONArray("siblings") ?: JSONArray()
         val revision = root.optString("sha").ifBlank { "main" }
+        val cardData = root.optJSONObject("cardData")
         val license = root.optString("license").ifBlank {
-            root.optJSONObject("cardData")?.optString("license").orEmpty()
+            cardData?.optString("license").orEmpty()
         }.ifBlank { "License not declared" }
+        val tags = buildList {
+            val tagArray = root.optJSONArray("tags") ?: JSONArray()
+            for (index in 0 until tagArray.length()) tagArray.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+        }.distinct().take(12)
+        val pipelineTag = root.optString("pipeline_tag").ifBlank { cardData?.optString("pipeline_tag").orEmpty() }.ifBlank { null }
+        val library = root.optString("library_name").ifBlank { root.optString("library").ifBlank { cardData?.optString("library_name").orEmpty() } }.ifBlank { null }
         val files = buildList {
             for (index in 0 until siblings.length()) {
                 val sibling = siblings.optJSONObject(index) ?: continue
@@ -105,6 +112,11 @@ class HuggingFaceClient(private val deviceProfile: DeviceProfile) {
             downloads = root.optLong("downloads", 0L),
             gated = root.optBoolean("gated", false),
             files = files,
+            pipelineTag = pipelineTag,
+            library = library,
+            tags = tags,
+            likes = root.optLong("likes", 0L),
+            lastModified = root.optString("lastModified").takeIf { it.isNotBlank() },
         )
     }
 

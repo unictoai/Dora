@@ -30,6 +30,8 @@ data class HuggingFaceFileCandidate(
             ?: "GGUF"
 }
 
+enum class CatalogFilter { ALL, RECOMMENDED, SMALLEST, MOST_DOWNLOADED }
+
 data class HuggingFaceCandidate(
     val repoId: String,
     val displayName: String,
@@ -40,6 +42,11 @@ data class HuggingFaceCandidate(
     val downloads: Long,
     val gated: Boolean,
     val files: List<HuggingFaceFileCandidate>,
+    val pipelineTag: String? = null,
+    val library: String? = null,
+    val tags: List<String> = emptyList(),
+    val likes: Long = 0L,
+    val lastModified: String? = null,
 ) {
     val recommendedFile: HuggingFaceFileCandidate?
         get() = files.firstOrNull { it.deviceFit.level == DeviceFitLevel.RECOMMENDED }
