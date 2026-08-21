@@ -66,9 +66,14 @@ private val DoraTypography = Typography().run {
 }
 
 @Composable
-fun DoraTheme(content: @Composable () -> Unit) {
+fun DoraTheme(themeMode: String = "SYSTEM", content: @Composable () -> Unit) {
+    val dark = when (themeMode.uppercase()) {
+        "DARK" -> true
+        "LIGHT" -> false
+        else -> isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        colorScheme = if (dark) DarkColors else LightColors,
         typography = DoraTypography,
         content = content,
     )

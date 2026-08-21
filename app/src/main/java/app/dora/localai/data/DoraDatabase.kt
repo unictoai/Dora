@@ -174,6 +174,9 @@ interface DoraDao {
     @Query("DELETE FROM conversation_records")
     suspend fun deleteAllConversations()
 
+    @Query("DELETE FROM job_records")
+    suspend fun deleteAllJobs()
+
     @Query("SELECT * FROM document_records ORDER BY updatedAt DESC")
     suspend fun allDocuments(): List<DocumentRecord>
 

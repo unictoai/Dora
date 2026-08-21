@@ -27,12 +27,24 @@ class DeviceProfile(context: Context) {
     fun fitForModel(modelBytes: Long): DeviceFit {
         val storageRequired = modelBytes + (512L * 1024L * 1024L)
         val memoryRequired = (modelBytes * 1.8).toLong()
+        val details = fun(level: DeviceFitLevel, label: String, explanation: String, allowed: Boolean) = DeviceFit(
+            level = level,
+            label = label,
+            explanation = explanation,
+            allowed = allowed,
+            modelSizeBytes = modelBytes,
+            storageRequiredBytes = storageRequired,
+            availableStorageBytes = availableStorageBytes,
+            memoryRequiredBytes = memoryRequired,
+            totalRamBytes = totalRamBytes,
+            primaryAbi = primaryAbi,
+        )
         return when {
-            !isArm64 -> DeviceFit(DeviceFitLevel.UNSUPPORTED, "ARM64 required", "This build runs native inference on arm64-v8a devices only.", false)
-            availableStorageBytes < storageRequired -> DeviceFit(DeviceFitLevel.TOO_HEAVY, "Not enough storage", "Keep at least ${formatBytes(storageRequired - availableStorageBytes)} free for a safe download and model staging.", false)
-            totalRamBytes < memoryRequired -> DeviceFit(DeviceFitLevel.TOO_HEAVY, "High memory risk", "This model may cause memory pressure; choose a smaller quantization.", false)
-            totalRamBytes >= modelBytes * 2.4 && availableStorageBytes >= modelBytes * 2.5 -> DeviceFit(DeviceFitLevel.RECOMMENDED, "Recommended for this device", "Fits the measured RAM and storage budget with headroom.", true)
-            else -> DeviceFit(DeviceFitLevel.POSSIBLE, "Possible with caution", "This model may work, but expect slower loading or thermal pressure.", true)
+            !isArm64 -> details(DeviceFitLevel.UNSUPPORTED, "ARM64 required", "This build runs native inference on arm64-v8a devices only.", false)
+            availableStorageBytes < storageRequired -> details(DeviceFitLevel.TOO_HEAVY, "Not enough storage", "Keep at least ${formatBytes(storageRequired - availableStorageBytes)} free for a safe download and model staging.", false)
+            totalRamBytes < memoryRequired -> details(DeviceFitLevel.TOO_HEAVY, "High memory risk", "This model may cause memory pressure; choose a smaller quantization.", false)
+            totalRamBytes >= modelBytes * 2.4 && availableStorageBytes >= modelBytes * 2.5 -> details(DeviceFitLevel.RECOMMENDED, "Recommended for this device", "Fits the measured RAM and storage budget with headroom.", true)
+            else -> details(DeviceFitLevel.POSSIBLE, "Possible with caution", "This model may work, but expect slower loading or thermal pressure.", true)
         }
     }
 

@@ -1,5 +1,6 @@
 package app.dora.localai
 
+import android.Manifest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.material.icons.Icons
@@ -133,6 +135,13 @@ private data class DoraDestination(
 @Composable
 fun DoraApp(vm: MainViewModel = viewModel()) {
     val state by vm.uiState.collectAsStateWithLifecycle()
+    DoraTheme(themeMode = state.themeMode) {
+        DoraAppBody(state = state, vm = vm)
+    }
+}
+
+@Composable
+private fun DoraAppBody(state: DoraUiState, vm: MainViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::importGguf)
@@ -146,6 +155,10 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
     val exportJsonLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri?.let { vm.exportActiveConversation(it, ConversationExportFormat.JSON) }
     }
+    val importConversationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::importConversation)
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val destinations = listOf(
         DoraDestination("Chat", Icons.Default.ChatBubbleOutline),
         DoraDestination("Models", Icons.Default.Memory),
@@ -184,6 +197,7 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
                     onBrowseModels = vm::openModelDiscovery,
                     onImportModel = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
                     onImportDocument = { documentLauncher.launch(arrayOf("text/plain", "text/markdown", "text/csv", "application/json", "application/xml")) },
+                    onImportConversation = { importConversationLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
                     onExportMarkdown = {
                         val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
                             .replace(Regex("[^A-Za-z0-9._-]+"), "_")
@@ -200,7 +214,7 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
                     },
                 )
                 1 -> ModelsScreen(state, vm, onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) })
-                else -> SettingsScreen(state, vm)
+                else -> SettingsScreen(state, vm, onRequestNotificationPermission = { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) })
             }
         }
     }
@@ -261,13 +275,15 @@ private fun SetupPoint(title: String, description: String) {
 }
 
 @Composable
-private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onExportMarkdown: () -> Unit, onExportJson: () -> Unit) {
+private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onImportConversation: () -> Unit, onExportMarkdown: () -> Unit, onExportJson: () -> Unit) {
     val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: state.conversations.first()
     val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == ModelKind.TEXT && it.filePath != null && it.verified }
     val contextEstimate = conversation.messages.sumOf { estimateTokensForUi(it.text) }
     var showSettings by remember { mutableStateOf(false) }
     var showExportOptions by remember { mutableStateOf(false) }
     var renameConversationId by remember { mutableStateOf<String?>(null) }
+    var showEditPrompt by remember { mutableStateOf(false) }
+    var editPromptText by remember { mutableStateOf("") }
     Column(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp),
     ) {
@@ -293,6 +309,9 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
             }
             IconButton(onClick = vm::createConversation, enabled = !state.isGenerating) {
                 Icon(Icons.Default.Add, contentDescription = "New conversation")
+            }
+            IconButton(onClick = onImportConversation, enabled = !state.isGenerating) {
+                Icon(Icons.Default.Description, contentDescription = "Import conversation")
             }
             IconButton(onClick = { showExportOptions = true }, enabled = !state.isGenerating && conversation.messages.isNotEmpty()) {
                 Icon(Icons.Default.FileDownload, contentDescription = "Export conversation")
@@ -325,7 +344,16 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
         if (activeModel == null && conversation.messages.isEmpty()) {
             NoModelChatState(onBrowseModels = onBrowseModels, onImportModel = onImportModel, modifier = Modifier.weight(1f).fillMaxWidth())
         } else {
-            ChatHistory(conversation.messages, modifier = Modifier.weight(1f).fillMaxWidth())
+            val lastAssistantId = conversation.messages.lastOrNull { it.role == MessageRole.ASSISTANT }?.id
+            val lastUserPrompt = conversation.messages.lastOrNull { it.role == MessageRole.USER }?.text
+            ChatHistory(
+                messages = conversation.messages,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                actionMessageId = lastAssistantId,
+                canEdit = lastUserPrompt != null,
+                onRegenerate = vm::regenerateLastAssistant,
+                onEdit = { editPromptText = lastUserPrompt.orEmpty(); showEditPrompt = true },
+            )
         }
         Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
             OutlinedTextField(
@@ -349,6 +377,13 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
             onDismiss = { showExportOptions = false },
             onMarkdown = { showExportOptions = false; onExportMarkdown() },
             onJson = { showExportOptions = false; onExportJson() },
+        )
+    }
+    if (showEditPrompt) {
+        EditPromptDialog(
+            initialText = editPromptText,
+            onDismiss = { showEditPrompt = false },
+            onSave = { revised -> showEditPrompt = false; vm.editLastUserMessageAndRegenerate(revised) },
         )
     }
     if (showSettings) {
@@ -574,7 +609,14 @@ private fun LocalStatus(isGenerating: Boolean) {
 }
 
 @Composable
-private fun ChatHistory(messages: List<ChatMessage>, modifier: Modifier) {
+private fun ChatHistory(
+    messages: List<ChatMessage>,
+    modifier: Modifier,
+    actionMessageId: String? = null,
+    canEdit: Boolean = false,
+    onRegenerate: () -> Unit = {},
+    onEdit: () -> Unit = {},
+) {
     if (messages.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -586,12 +628,20 @@ private fun ChatHistory(messages: List<ChatMessage>, modifier: Modifier) {
         return
     }
     LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(18.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 20.dp, bottom = 12.dp)) {
-        items(messages, key = { it.id }) { message -> MessageBubble(message) }
+        itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
+            MessageBubble(
+                message = message,
+                showActions = message.id == actionMessageId && !message.isPartial,
+                canEdit = canEdit,
+                onRegenerate = onRegenerate,
+                onEdit = onEdit,
+            )
+        }
     }
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage) {
+private fun MessageBubble(message: ChatMessage, showActions: Boolean = false, canEdit: Boolean = false, onRegenerate: () -> Unit = {}, onEdit: () -> Unit = {}) {
     val isUser = message.role == MessageRole.USER
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Column(modifier = Modifier.fillMaxWidth(if (isUser) 0.84f else 0.94f)) {
@@ -610,9 +660,27 @@ private fun MessageBubble(message: ChatMessage) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                if (showActions) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = onRegenerate) { Text("Regenerate") }
+                        if (canEdit) TextButton(onClick = onEdit) { Text("Edit prompt") }
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun EditPromptDialog(initialText: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var draft by remember(initialText) { mutableStateOf(initialText) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit prompt") },
+        text = { OutlinedTextField(value = draft, onValueChange = { draft = it }, minLines = 3, maxLines = 8, label = { Text("Prompt") }) },
+        confirmButton = { TextButton(onClick = { onSave(draft) }, enabled = draft.trim().isNotEmpty()) { Text("Regenerate") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -949,11 +1017,13 @@ private fun formatCountForUi(value: Long): String = when {
 
 @Composable
 private fun HuggingFaceFileRow(file: HuggingFaceFileCandidate, candidate: HuggingFaceCandidate, vm: MainViewModel, activeDownloadId: String?) {
+    var showFitDetails by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Text(file.filename, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("${file.quantization} • ${formatBytesForUi(file.sizeBytes)}", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
             FitLabel(file.deviceFit.level)
+            IconButton(onClick = { showFitDetails = true }) { Icon(Icons.Default.Info, contentDescription = "Explain model fit") }
         }
         Text(file.deviceFit.explanation, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Button(
@@ -963,6 +1033,28 @@ private fun HuggingFaceFileRow(file: HuggingFaceFileCandidate, candidate: Huggin
             shape = RoundedCornerShape(12.dp),
         ) { Text(if (activeDownloadId == "hf-${file.repoId}-${file.filename}".replace(Regex("[^A-Za-z0-9._-]"), "_")) "Downloading…" else if (file.deviceFit.allowed) "Download to Dora" else "Not recommended") }
     }
+    if (showFitDetails) ModelFitDialog(file = file, onDismiss = { showFitDetails = false })
+}
+
+@Composable
+private fun ModelFitDialog(file: HuggingFaceFileCandidate, onDismiss: () -> Unit) {
+    val fit = file.deviceFit
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Why this fit is ${fit.label.lowercase()}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DetailLine("Model file", formatBytesForUi(fit.modelSizeBytes ?: file.sizeBytes))
+                DetailLine("Storage required", fit.storageRequiredBytes?.let(::formatBytesForUi) ?: "Unavailable")
+                DetailLine("Storage available", fit.availableStorageBytes?.let(::formatBytesForUi) ?: "Unavailable")
+                DetailLine("RAM estimate", fit.memoryRequiredBytes?.let(::formatBytesForUi) ?: "Unavailable")
+                DetailLine("Device RAM", fit.totalRamBytes?.let(::formatBytesForUi) ?: "Unavailable")
+                DetailLine("ABI", fit.primaryAbi ?: "Unavailable")
+                Text(fit.explanation, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
 }
 
 @Composable
@@ -987,6 +1079,7 @@ private fun formatBytesForUi(bytes: Long): String = when {
 @Composable
 private fun ModelCard(model: LocalModel, vm: MainViewModel, isActive: Boolean, onDetails: () -> Unit) {
     val imported = model.installState == ModelInstallState.INSTALLED && model.filePath != null && model.verified
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.Top) {
@@ -1014,10 +1107,19 @@ private fun ModelCard(model: LocalModel, vm: MainViewModel, isActive: Boolean, o
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(if (isActive) "Active local model" else "Verified local model", style = MaterialTheme.typography.labelLarge, color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
                     if (imported && !isActive) OutlinedButton(onClick = { vm.selectActiveModel(model.id) }, shape = RoundedCornerShape(12.dp)) { Text("Use for chat") }
-                    IconButton(onClick = { vm.deleteModel(model.id) }) { Icon(Icons.Default.DeleteOutline, contentDescription = "Remove model") }
+                    IconButton(onClick = { showDeleteConfirmation = true }) { Icon(Icons.Default.DeleteOutline, contentDescription = "Remove model") }
                 }
             }
         }
+    }
+    if (showDeleteConfirmation) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDeleteConfirmation = false },
+            title = { Text("Remove ${model.name}?") },
+            text = { Text("Dora will remove this model from its local registry and delete its private GGUF file. This cannot be undone unless you import or download it again.") },
+            confirmButton = { TextButton(onClick = { showDeleteConfirmation = false; vm.deleteModel(model.id) }) { Text("Remove model") } },
+            dismissButton = { TextButton(onClick = { showDeleteConfirmation = false }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -1065,14 +1167,25 @@ private fun formatParameterCount(value: Long): String = when {
 private fun estimateTokensForUi(text: String): Int = text.trim().takeIf { it.isNotEmpty() }?.split(Regex("\\s+"))?.size ?: 0
 
 @Composable
-private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
+private fun SettingsScreen(state: DoraUiState, vm: MainViewModel, onRequestNotificationPermission: () -> Unit) {
     var showDiagnostics by remember { mutableStateOf(false) }
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().padding(horizontal = 20.dp)) {
         ScreenHeader("Settings", "Simple controls for a private local app.")
         Spacer(Modifier.height(16.dp))
+        Text("Appearance", fontWeight = FontWeight.SemiBold)
+        Row(modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("SYSTEM" to "System", "LIGHT" to "Light", "DARK" to "Dark").forEach { (mode, label) ->
+                FilterChip(selected = state.themeMode == mode, onClick = { vm.setThemeMode(mode) }, label = { Text(label) })
+            }
+        }
+        HorizontalDivider()
         SettingRow(Icons.Default.Lock, "Offline-only mode", "Inference never needs a cloud account or remote fallback.") {
             Switch(checked = state.isOfflineOnly, onCheckedChange = { vm.toggleOfflineOnly() })
         }
+        SettingRow(Icons.Default.Download, "Download notifications", "Allow Android to show durable progress and failure notifications for large model downloads.", trailing = {
+            TextButton(onClick = onRequestNotificationPermission) { Text("Allow") }
+        })
         HorizontalDivider()
         SettingRow(Icons.Default.Lock, "Incognito mode", "New chat turns stay in memory and are not written to Room. Existing history is not deleted.") {
             Switch(checked = state.privacyIncognito, onCheckedChange = { vm.toggleIncognito() })
@@ -1094,15 +1207,32 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel) {
             Icons.Default.Storage,
             "Storage",
             "${formatBytesForUi(state.storageSummary.availableBytes)} available of ${formatBytesForUi(state.storageSummary.totalBytes)} • ${formatBytesForUi(state.storageSummary.modelBytes)} models • ${formatBytesForUi(state.storageSummary.temporaryDownloadBytes)} temporary downloads • ${state.storageSummary.orphanedFileCount} orphaned files",
+            trailing = if (state.storageSummary.orphanedFileCount > 0) ({ TextButton(onClick = vm::cleanupOrphanedFiles) { Text("Clean") } }) else null,
         )
         HorizontalDivider()
         SettingRow(Icons.Default.Info, "Runtime", state.runtimeNotice, trailing = { TextButton(onClick = { showDiagnostics = true }) { Text("Details") } })
+        SettingRow(Icons.Default.Tune, "Local benchmark", "Run a short real llama.cpp measurement on the active model. Results are device-specific and are not competitor claims.", trailing = {
+            TextButton(onClick = vm::runLocalBenchmark, enabled = !state.isBenchmarking) { Text(if (state.isBenchmarking) "Running…" else "Run") }
+        })
+        state.benchmarkResult?.let { result ->
+            Text(result, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 48.dp, bottom = 12.dp))
+        }
+        HorizontalDivider()
         Spacer(Modifier.height(24.dp))
-        TextButton(onClick = vm::clearAllLocalData, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
+        TextButton(onClick = { showDeleteConfirmation = true }, modifier = Modifier.fillMaxWidth()) { Text("Delete all local data") }
         Spacer(Modifier.height(12.dp))
         Text("Dora ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
     }
     if (showDiagnostics) DiagnosticsDialog(state = state, onDismiss = { showDiagnostics = false })
+    if (showDeleteConfirmation) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDeleteConfirmation = false },
+            title = { Text("Delete all local data?") },
+            text = { Text("This removes conversations, imported documents, downloaded model files, partial downloads, saved settings, and background job records from this device. This cannot be undone.") },
+            confirmButton = { TextButton(onClick = { showDeleteConfirmation = false; vm.clearAllLocalData() }) { Text("Delete everything") } },
+            dismissButton = { TextButton(onClick = { showDeleteConfirmation = false }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable

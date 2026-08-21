@@ -43,7 +43,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 private const val MAX_DOCUMENT_CONTEXT_CHUNKS = 4
@@ -91,7 +93,10 @@ data class DoraUiState(
     val imagePrompt: String = "",
     val jobs: List<DoraJob> = emptyList(),
     val isOfflineOnly: Boolean = true,
+    val themeMode: String = "SYSTEM",
     val isGenerating: Boolean = false,
+    val isBenchmarking: Boolean = false,
+    val benchmarkResult: String? = null,
     val toastMessage: String? = null,
     val runtimeNotice: String = "Demo adapter active — native llama.cpp bridge is next",
     val nativeRuntimeVersion: String = "Unavailable",
@@ -184,6 +189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             models = allModels,
             activeModelId = restoredActiveModel ?: fallbackActiveModel,
             isOfflineOnly = registry.isOfflineOnly(),
+            themeMode = registry.themeMode(),
             privacyIncognito = registry.isIncognito(),
             retentionDays = registry.retentionDays(),
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
@@ -498,6 +504,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setComposerText(value: String) = _uiState.update { it.copy(composerText = value) }
 
     fun selectActiveModel(modelId: String) {
+        if (_uiState.value.isGenerating || _uiState.value.isBenchmarking) {
+            _uiState.update { it.copy(toastMessage = "Stop local work before switching models") }
+            return
+        }
         val model = _uiState.value.models.firstOrNull { it.id == modelId }
         if (model?.kind != app.dora.localai.domain.ModelKind.TEXT || model.filePath.isNullOrBlank() || !model.verified) {
             _uiState.update { it.copy(toastMessage = "Only verified local text models can be active") }
@@ -543,6 +553,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (_uiState.value.activeDownloadId != null) return
         val modelId = "hf-${file.repoId}-${file.filename}".replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val existingArtifact = registry.artifact(modelId)
+        if (existingArtifact != null && File(existingArtifact.path).isFile && !registry.isArtifactInvalid(modelId)) {
+            registry.setActiveModelId(modelId)
+            _uiState.update { it.copy(activeModelId = modelId, toastMessage = "Already installed: ${existingArtifact.name}") }
+            return
+        }
         if (_uiState.value.jobs.any { it.download?.modelId == modelId && it.download?.state in setOf(DownloadState.QUEUED, DownloadState.STARTING, DownloadState.DOWNLOADING, DownloadState.PAUSED, DownloadState.RETRYING, DownloadState.VERIFYING, DownloadState.VALIDATING, DownloadState.INSTALLING) }) {
             _uiState.update { it.copy(toastMessage = "This model is already in Dora’s download center.") }
             return
@@ -761,6 +777,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun runLocalBenchmark() {
+        if (_uiState.value.isGenerating || _uiState.value.isBenchmarking) return
+        val model = _uiState.value.models.firstOrNull { it.id == _uiState.value.activeModelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null && it.verified }
+        if (model == null || !nativeTextEngine.isProductionReady) {
+            _uiState.update { it.copy(toastMessage = "Select a verified model and load native llama.cpp before benchmarking") }
+            return
+        }
+        _uiState.update { it.copy(isBenchmarking = true, benchmarkResult = null, toastMessage = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.Default) {
+                runCatching {
+                    val settings = (_uiState.value.conversationSettings[_uiState.value.activeConversationId] ?: GenerationSettings()).normalized().copy(maxTokens = 32)
+                    val startedAt = System.nanoTime()
+                    val output = NativeLlamaEngine.generate(
+                        path = model.filePath!!,
+                        prompt = "Reply with one short sentence confirming that this is a local benchmark.",
+                        maxTokens = settings.maxTokens,
+                        threads = settings.threads,
+                        temperature = settings.temperature,
+                        topK = settings.topK,
+                        topP = settings.topP,
+                    )
+                    val elapsed = ((System.nanoTime() - startedAt) / 1_000_000L).coerceAtLeast(1L)
+                    val tokens = estimateTokenCount(output)
+                    "${tokens} estimated tokens • ${elapsed} ms end-to-end • %.1f estimated tok/s".format(tokens * 1_000f / elapsed)
+                }
+            }
+            _uiState.update { state -> state.copy(isBenchmarking = false, benchmarkResult = result.getOrNull(), toastMessage = result.exceptionOrNull()?.message ?: "Local benchmark complete") }
+        }
+    }
+
+    fun cleanupOrphanedFiles() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val knownPaths = registry.allArtifacts().map { it.path }.toSet()
+            val removed = modelStore.deleteOrphanedFiles(knownPaths)
+            withContext(Dispatchers.Main) {
+                _uiState.update { it.copy(storageSummary = storageSummary(), toastMessage = if (removed == 0) "No orphaned model files found" else "Removed $removed orphaned private file${if (removed == 1) "" else "s"}") }
+            }
+        }
+    }
+
+    fun setThemeMode(mode: String) {
+        val normalized = mode.uppercase().takeIf { it in setOf("SYSTEM", "LIGHT", "DARK") } ?: "SYSTEM"
+        registry.setThemeMode(normalized)
+        _uiState.update { it.copy(themeMode = normalized) }
+    }
+
     fun toggleOfflineOnly() {
         val value = !_uiState.value.isOfflineOnly
         registry.setOfflineOnly(value)
@@ -789,20 +852,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearAllLocalData() {
         registry.clearAll()
         viewModelScope.launch(Dispatchers.IO) {
+            dao.allDownloadJobs().forEach { record ->
+                record.modelId?.let { workManager.cancelUniqueWork("download-$it") }
+                record.downloadId?.let(downloadControls::requestCancel)
+            }
+            modelStore.clearPrivateArtifacts()
             dao.deleteAllMessages()
             dao.deleteAllConversations()
+            dao.deleteAllJobs()
             dao.deleteAllDocumentChunks()
             dao.deleteAllDocuments()
+            withContext(Dispatchers.Main) {
+                _uiState.value = initialState().copy(toastMessage = "All local Dora data deleted")
+            }
         }
-        val freshConversation = Conversation(title = "New local conversation")
-        _uiState.value = DoraUiState(
-            conversations = listOf(freshConversation),
-            activeConversationId = freshConversation.id,
-            toastMessage = "Local data deleted",
-        )
+        _uiState.update { it.copy(isGenerating = false, activeDownloadId = null, toastMessage = "Deleting local Dora data…") }
+        NativeLlamaEngine.cancel()
+        generationJob?.cancel()
+        generationJob = null
     }
 
     fun clearToast() = _uiState.update { it.copy(toastMessage = null) }
+
+    fun importConversation(uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val input = getApplication<Application>().contentResolver.openInputStream(uri) ?: error("Dora could not open the selected conversation")
+                    val bytes = input.use { stream -> readBoundedBytes(stream, MAX_IMPORT_BYTES + 1) }
+                    require(bytes.size <= MAX_IMPORT_BYTES) { "Conversation import is limited to 5 MB." }
+                    val root = org.json.JSONObject(bytes.toString(Charsets.UTF_8))
+                    val title = root.optString("title", "Imported conversation").trim().take(80).ifBlank { "Imported conversation" }
+                    val messagesJson = root.optJSONArray("messages") ?: error("The selected file has no messages array")
+                    require(messagesJson.length() in 1..MAX_IMPORTED_MESSAGES) { "The conversation contains an unsupported number of messages." }
+                    val messages = buildList {
+                        for (index in 0 until messagesJson.length()) {
+                            val item = messagesJson.optJSONObject(index) ?: error("Message $index is invalid")
+                            val role = runCatching { MessageRole.valueOf(item.optString("role").uppercase()) }.getOrElse { error("Message $index has an invalid role") }
+                            val text = item.optString("text").take(MAX_IMPORTED_MESSAGE_CHARS)
+                            add(ChatMessage(role = role, text = text, metrics = item.optJSONObject("metrics")?.let { metrics ->
+                                InferenceMetrics(
+                                    firstTokenLatencyMillis = metrics.optLong("firstTokenLatencyMillis"),
+                                    generationTimeMillis = metrics.optLong("generationTimeMillis"),
+                                    tokensGenerated = metrics.optInt("tokensGenerated"),
+                                    tokensPerSecond = metrics.optDouble("tokensPerSecond").toFloat(),
+                                    contextTokenEstimate = metrics.optInt("contextTokenEstimate"),
+                                ).normalized()
+                            }))
+                        }
+                    }
+                    Conversation(title = title, messages = messages)
+                }
+            }
+            result.onSuccess { imported ->
+                val settings = GenerationSettings()
+                _uiState.update { state ->
+                    state.copy(
+                        conversations = listOf(imported) + state.conversations,
+                        activeConversationId = imported.id,
+                        conversationSettings = state.conversationSettings + (imported.id to settings),
+                        showConversationList = false,
+                        toastMessage = "Conversation imported locally",
+                    )
+                }
+                persistConversation(imported, settings)
+                imported.messages.forEachIndexed { index, message -> persistMessage(imported.id, message, index.toLong()) }
+            }.onFailure { error ->
+                _uiState.update { it.copy(toastMessage = "Import failed: ${error.message ?: "invalid conversation file"}") }
+            }
+        }
+    }
 
     fun exportActiveConversation(uri: Uri, format: ConversationExportFormat) {
         val state = _uiState.value
@@ -861,6 +980,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importGguf(uri: Uri) {
+        if (_uiState.value.isGenerating || _uiState.value.isBenchmarking) {
+            _uiState.update { it.copy(toastMessage = "Stop local work before importing a model") }
+            return
+        }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { modelStore.importGguf(uri) }
             val artifact = result.getOrNull()
@@ -876,19 +999,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(toastMessage = "Dora could not load this GGUF on this ARM64 device") }
                 return@launch
             }
-            registry.setArtifact(LocalRegistry.StoredArtifact(starterTextModel.id, artifact.name, artifact.path, artifact.sizeBytes, artifact.sha256))
-            registry.setActiveModelId(starterTextModel.id)
+            registry.setArtifact(LocalRegistry.StoredArtifact(artifact.id, artifact.name, artifact.path, artifact.sizeBytes, artifact.sha256))
+            registry.setActiveModelId(artifact.id)
+            val importedModel = LocalModel(
+                id = artifact.id,
+                name = artifact.metadata.displayName?.takeIf { it.isNotBlank() } ?: artifact.name,
+                publisher = "Local import",
+                kind = app.dora.localai.domain.ModelKind.TEXT,
+                format = "${artifact.metadata.quantization ?: "GGUF"} GGUF",
+                sizeLabel = formatBytes(artifact.sizeBytes),
+                memoryLabel = "Imported local model",
+                license = "User-provided file",
+                description = "Imported and validated from private storage.",
+                installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
+                verified = true,
+                recommended = false,
+                filePath = artifact.path,
+                metadata = artifact.metadata,
+            )
             _uiState.update { state ->
-                state.copy(models = state.models.map { model ->
-                    if (model.id == starterTextModel.id) model.copy(
-                        name = artifact.name,
-                        installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
-                        verified = true,
-                        filePath = artifact.path,
-                        sizeLabel = formatBytes(artifact.sizeBytes),
-                        metadata = artifact.metadata,
-                    ) else model
-                }, toastMessage = "Model ready: ${artifact.name}")
+                state.copy(models = state.models.filterNot { it.id == artifact.id } + importedModel, activeModelId = artifact.id, toastMessage = "Model ready: ${importedModel.name}")
             }
         }
     }
@@ -906,6 +1036,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteModel(modelId: String) {
+        if (_uiState.value.isGenerating || _uiState.value.isBenchmarking) {
+            _uiState.update { it.copy(toastMessage = "Stop local work before removing a model") }
+            return
+        }
         modelStore.delete(_uiState.value.models.firstOrNull { it.id == modelId }?.filePath)
         if (registry.activeModelId() == modelId) registry.setActiveModelId(null)
         registry.setModelInstalled(modelId, false)
@@ -920,28 +1054,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun sendMessage() {
         val prompt = _uiState.value.composerText.trim()
         if (prompt.isBlank() || _uiState.value.isGenerating) return
-        val conversationId = _uiState.value.activeConversationId
-        val currentConversation = _uiState.value.conversations.firstOrNull { it.id == conversationId } ?: return
+        val state = _uiState.value
+        val conversationId = state.activeConversationId
+        val currentConversation = state.conversations.firstOrNull { it.id == conversationId } ?: return
+        val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null && it.verified }
+        if (activeModel == null) {
+            _uiState.update { it.copy(toastMessage = "Select a verified local GGUF model before chatting") }
+            return
+        }
+        if (!nativeTextEngine.isProductionReady) {
+            _uiState.update { it.copy(toastMessage = "Native llama.cpp is unavailable; Dora will not substitute demo output") }
+            return
+        }
         val userMessage = ChatMessage(role = MessageRole.USER, text = prompt)
         val assistantMessage = ChatMessage(role = MessageRole.ASSISTANT, text = "", isPartial = true)
         if (currentConversation.messages.isEmpty()) {
             val title = prompt.replace(Regex("\\s+"), " ").take(42).ifBlank { "New local conversation" }
             updateConversation(conversationId) { it.copy(title = title) }
         }
-        updateConversation(conversationId) { conversation ->
-            conversation.copy(messages = conversation.messages + userMessage + assistantMessage)
-        }
+        updateConversation(conversationId) { conversation -> conversation.copy(messages = conversation.messages + userMessage + assistantMessage) }
         persistMessage(conversationId, userMessage, currentConversation.messages.size.toLong())
         persistMessage(conversationId, assistantMessage, currentConversation.messages.size.toLong() + 1L)
-        val settings = _uiState.value.activeChatSettings.normalized()
         _uiState.update { it.copy(composerText = "", isGenerating = true, toastMessage = null) }
+        startGeneration(conversationId, prompt)
+    }
 
+    fun regenerateLastAssistant() {
+        if (_uiState.value.isGenerating) return
+        val conversationId = _uiState.value.activeConversationId
+        val conversation = _uiState.value.conversations.firstOrNull { it.id == conversationId } ?: return
+        val assistantIndex = conversation.messages.indexOfLast { it.role == MessageRole.ASSISTANT }
+        val userIndex = assistantIndex - 1
+        if (assistantIndex < 0 || userIndex < 0 || conversation.messages[userIndex].role != MessageRole.USER) return
+        val activeModel = _uiState.value.models.firstOrNull { it.id == _uiState.value.activeModelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null && it.verified }
+        if (activeModel == null || !nativeTextEngine.isProductionReady) {
+            _uiState.update { it.copy(toastMessage = "Native llama.cpp is unavailable; regeneration was not started") }
+            return
+        }
+        val replacement = conversation.messages[assistantIndex].copy(text = "", isPartial = true, metrics = null)
+        updateConversation(conversationId) { current -> current.copy(messages = current.messages.toMutableList().also { it[assistantIndex] = replacement }) }
+        persistMessage(conversationId, replacement, assistantIndex.toLong())
+        _uiState.update { it.copy(isGenerating = true, toastMessage = null) }
+        startGeneration(conversationId, conversation.messages[userIndex].text)
+    }
+
+    fun editLastUserMessageAndRegenerate(text: String) {
+        val revised = text.trim()
+        if (revised.isBlank() || _uiState.value.isGenerating) return
+        val conversationId = _uiState.value.activeConversationId
+        val conversation = _uiState.value.conversations.firstOrNull { it.id == conversationId } ?: return
+        val assistantIndex = conversation.messages.indexOfLast { it.role == MessageRole.ASSISTANT }
+        val userIndex = assistantIndex - 1
+        if (assistantIndex < 0 || userIndex < 0 || conversation.messages[userIndex].role != MessageRole.USER) return
+        val revisedUser = conversation.messages[userIndex].copy(text = revised)
+        val replacementAssistant = conversation.messages[assistantIndex].copy(text = "", isPartial = true, metrics = null)
+        updateConversation(conversationId) { current -> current.copy(messages = current.messages.toMutableList().also { it[userIndex] = revisedUser; it[assistantIndex] = replacementAssistant }) }
+        persistMessage(conversationId, revisedUser, userIndex.toLong())
+        persistMessage(conversationId, replacementAssistant, assistantIndex.toLong())
+        _uiState.update { it.copy(isGenerating = true, toastMessage = null) }
+        startGeneration(conversationId, revised)
+    }
+
+    private fun startGeneration(conversationId: String, prompt: String) {
+        val settings = _uiState.value.conversationSettings[conversationId]?.normalized() ?: GenerationSettings()
         generationJob?.cancel()
         generationJob = viewModelScope.launch {
             try {
                 val conversation = _uiState.value.conversations.first { it.id == conversationId }
                 val activeModel = _uiState.value.models.firstOrNull { it.id == _uiState.value.activeModelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null && it.verified }
-                val engine = if (activeModel != null && nativeTextEngine.isProductionReady) nativeTextEngine else textEngine
+                    ?: error("No verified local model is active")
                 val documentPrompt = if (_uiState.value.documentSearchEnabled) documentContext(prompt) else ""
                 val systemPrompt = listOf(settings.systemPrompt.takeIf { it.isNotBlank() }, documentPrompt.takeIf { it.isNotBlank() }).filterNotNull().joinToString("\n\n")
                 val history = if (systemPrompt.isBlank()) conversation.messages else listOf(ChatMessage(role = MessageRole.SYSTEM, text = systemPrompt)) + conversation.messages
@@ -949,7 +1130,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 var tokenCount = 0
                 var firstTokenAtNanos: Long? = null
                 val startedAtNanos = System.nanoTime()
-                engine.streamReply(activeModel ?: starterTextModel, history, settings).collect { token ->
+                nativeTextEngine.streamReply(activeModel, history, settings).collect { token ->
                     if (firstTokenAtNanos == null) firstTokenAtNanos = System.nanoTime()
                     tokenCount += estimateTokenCount(token)
                     accumulated += token
@@ -1091,6 +1272,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         append('"')
+    }
+
+    private fun readBoundedBytes(input: InputStream, limit: Int): ByteArray {
+        val output = ByteArrayOutputStream(limit)
+        val buffer = ByteArray(8 * 1024)
+        while (output.size() < limit) {
+            val count = input.read(buffer, 0, minOf(buffer.size, limit - output.size()))
+            if (count <= 0) break
+            output.write(buffer, 0, count)
+        }
+        return output.toByteArray()
+    }
+
+    private companion object {
+        const val MAX_IMPORT_BYTES = 5 * 1024 * 1024
+        const val MAX_IMPORTED_MESSAGES = 10_000
+        const val MAX_IMPORTED_MESSAGE_CHARS = 1_000_000
     }
 
     private fun formatBytes(bytes: Long): String = when {

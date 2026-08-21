@@ -52,3 +52,8 @@ The following prompt-aligned capabilities are now implemented on top of the pres
 Verification for this evidence pass completed with the debug Kotlin compile, unit tests, debug APK assembly, release APK assembly, lint, and ARM64 native CMake build. Added unit coverage checks metric normalization and representative GGUF scalar metadata parsing. The CI Room schema guard checks the committed v6 fixture.
 
 The current milestone remains a pre-alpha release. Dora intentionally does not claim image generation, voice, vision, cloud providers, plugins, MCP, or tool execution. The Comprehensive Development Prompt’s `minSdk 35` recommendation is not adopted: Dora retains `minSdk 26` to support Android 8+ as an explicit product constraint, and Hilt/Koin migration remains out of scope for this milestone.
+
+
+## v0.11 hardening evidence — 2026-08-21
+
+The hardening slice now refuses silent demo substitution in the user-facing native chat path, adds explicit regenerate and edit-and-regenerate actions, bounded JSON conversation import, persisted theme selection, notification permission UX, compatibility calculation details, device-local benchmark output, orphan cleanup, multi-model-safe import identities, model-operation concurrency guards, and confirmation dialogs for destructive actions. These changes improve capability honesty and recovery behavior without claiming image generation, voice, vision, cloud inference, plugins, MCP, or tool execution.

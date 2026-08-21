@@ -9,6 +9,12 @@ data class DeviceFit(
     val label: String,
     val explanation: String,
     val allowed: Boolean,
+    val modelSizeBytes: Long? = null,
+    val storageRequiredBytes: Long? = null,
+    val availableStorageBytes: Long? = null,
+    val memoryRequiredBytes: Long? = null,
+    val totalRamBytes: Long? = null,
+    val primaryAbi: String? = null,
 )
 
 data class HuggingFaceFileCandidate(

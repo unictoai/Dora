@@ -32,6 +32,12 @@ class LocalRegistry(context: Context) {
 
     fun retentionDays(): Int = prefs.getInt(KEY_RETENTION_DAYS, 0).coerceIn(0, 365)
 
+    fun themeMode(): String = prefs.getString(KEY_THEME_MODE, "SYSTEM")?.uppercase()?.takeIf { it in setOf("SYSTEM", "LIGHT", "DARK") } ?: "SYSTEM"
+
+    fun setThemeMode(value: String) {
+        prefs.edit().putString(KEY_THEME_MODE, value.uppercase().takeIf { it in setOf("SYSTEM", "LIGHT", "DARK") } ?: "SYSTEM").apply()
+    }
+
     fun setRetentionDays(value: Int) {
         prefs.edit().putInt(KEY_RETENTION_DAYS, value.coerceIn(0, 365)).apply()
     }
@@ -110,5 +116,6 @@ class LocalRegistry(context: Context) {
         const val KEY_INVALID_ARTIFACTS = "invalid_artifacts"
         const val KEY_INCOGNITO = "incognito"
         const val KEY_RETENTION_DAYS = "retention_days"
+        const val KEY_THEME_MODE = "theme_mode"
     }
 }

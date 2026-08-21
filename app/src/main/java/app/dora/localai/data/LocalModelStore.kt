@@ -62,6 +62,21 @@ class LocalModelStore(private val context: Context) {
         if (file.parentFile?.canonicalFile == modelDirectory.canonicalFile) file.delete()
     }
 
+    fun clearPrivateArtifacts() {
+        modelDirectory.listFiles().orEmpty().forEach { file ->
+            val safe = runCatching { file.canonicalFile.parentFile?.canonicalFile == modelDirectory.canonicalFile }.getOrDefault(false)
+            if (safe && file.extension.lowercase() in setOf("gguf", "part")) file.delete()
+        }
+    }
+
+    fun deleteOrphanedFiles(knownPaths: Set<String>): Int {
+        return modelDirectory.listFiles().orEmpty().count { file ->
+            val safe = runCatching { file.canonicalFile.parentFile?.canonicalFile == modelDirectory.canonicalFile }.getOrDefault(false)
+            val candidate = file.extension.lowercase() in setOf("gguf", "part") && file.absolutePath !in knownPaths
+            safe && candidate && file.delete()
+        }
+    }
+
     private fun queryDisplayName(uri: Uri): String? {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) return cursor.getString(0)

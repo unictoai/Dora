@@ -109,3 +109,10 @@ The export path now provides an explicit format choice. Markdown includes model 
 Verification completed for this milestone includes `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:assembleDebug`, `:app:assembleRelease`, and `:app:lintDebug` with the ARM64 native build. New unit coverage validates metric normalization and representative GGUF metadata parsing. The published APK is signed with an ephemeral pre-alpha test key, so it must not be treated as a production-signed artifact.
 
 The release remains **not beta-ready**. A physical ARM64 device is still required to validate model download and native loading, offline inference, cancellation, process death recovery, notification behavior, memory pressure, thermal throttling, large-text accessibility, and real throughput. Dora still does not ship image generation, voice, vision, cloud inference, plugins, MCP, or tool execution.
+
+
+## v0.11.0-prealpha hardening slice — 2026-08-21
+
+The next slice extends Dora’s real local-text workflow without introducing simulated capabilities. Chat generation now refuses to substitute the deterministic demo engine when a verified model or native llama.cpp runtime is unavailable. The latest assistant response can be regenerated, and the latest user prompt can be edited and regenerated through explicit UI actions. Conversations can round-trip through bounded JSON import and Markdown/JSON export, including normalized metrics when available.
+
+The slice also adds persisted System/Light/Dark theme selection, Android notification-permission request UX for long downloads, compatibility explanations showing the actual model-size, storage, RAM, and ABI inputs, real device-local benchmark output, orphaned private-file cleanup, multi-model-safe manual import identities, duplicate-install detection, model-operation guards during inference, and confirmation dialogs for destructive model/data removal. These capabilities remain subject to physical-device and instrumentation verification.
