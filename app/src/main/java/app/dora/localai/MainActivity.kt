@@ -3,6 +3,7 @@ package app.dora.localai
 import android.Manifest
 import android.content.Intent
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
@@ -102,11 +104,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import java.util.Locale
 import app.dora.localai.data.ConversationExportFormat
 import app.dora.localai.data.DoraStorageSummary
 import app.dora.localai.data.DoraUiState
 import app.dora.localai.data.MainViewModel
 import app.dora.localai.domain.CatalogFilter
+import app.dora.localai.domain.AssistantProfile
 import app.dora.localai.domain.ChatMessage
 import app.dora.localai.domain.Conversation
 import app.dora.localai.domain.CuratedModelSuggestion
@@ -115,6 +119,7 @@ import app.dora.localai.domain.DownloadState
 import app.dora.localai.domain.DoraJob
 import app.dora.localai.domain.HuggingFaceCandidate
 import app.dora.localai.domain.HuggingFaceFileCandidate
+import app.dora.localai.domain.GenerationSettings
 import app.dora.localai.domain.JobKind
 import app.dora.localai.domain.JobState
 import app.dora.localai.domain.LocalModel
@@ -145,14 +150,42 @@ fun DoraApp(vm: MainViewModel = viewModel()) {
 }
 
 @Composable
+private fun rememberDoraSpeech(): Pair<(String) -> Unit, () -> Unit> {
+    val context = LocalContext.current
+    val engine = remember { androidx.compose.runtime.mutableStateOf<TextToSpeech?>(null) }
+    androidx.compose.runtime.DisposableEffect(context) {
+        val tts = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                engine.value?.language = Locale.getDefault()
+            }
+        }
+        engine.value = tts
+        onDispose {
+            tts.stop()
+            tts.shutdown()
+            engine.value = null
+        }
+    }
+    val speak: (String) -> Unit = { text ->
+        engine.value?.speak(text.take(4_000), TextToSpeech.QUEUE_FLUSH, null, "dora-${System.nanoTime()}")
+    }
+    val stop: () -> Unit = { engine.value?.stop() }
+    return speak to stop
+}
+
+@Composable
 private fun DoraAppBody(state: DoraUiState, vm: MainViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
+    val speech = rememberDoraSpeech()
     val context = LocalContext.current
     val shareText: (String) -> Unit = { text ->
         context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text) }, "Share from Dora"))
     }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::importGguf)
+    }
+    val folderImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let(vm::importGgufFolder)
     }
     val documentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::importDocument)
@@ -207,6 +240,8 @@ private fun DoraAppBody(state: DoraUiState, vm: MainViewModel) {
                     onImportDocument = { documentLauncher.launch(arrayOf("text/plain", "text/markdown", "text/csv", "application/json", "application/xml")) },
                     onImportConversation = { importConversationLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
                     onShareMessage = shareText,
+                    onSpeakMessage = speech.first,
+                    onStopSpeaking = speech.second,
                     onExportMarkdown = {
                         val title = state.conversations.firstOrNull { it.id == state.activeConversationId }?.title.orEmpty()
                             .replace(Regex("[^A-Za-z0-9._-]+"), "_")
@@ -222,7 +257,12 @@ private fun DoraAppBody(state: DoraUiState, vm: MainViewModel) {
                         exportJsonLauncher.launch("$title.json")
                     },
                 )
-                1 -> ModelsScreen(state, vm, onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) })
+                1 -> ModelsScreen(
+                    state,
+                    vm,
+                    onImport = { importLauncher.launch(arrayOf("application/octet-stream", "application/gguf", "*/*")) },
+                    onImportFolder = { folderImportLauncher.launch(null) },
+                )
                 else -> SettingsScreen(state, vm, onRequestNotificationPermission = { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) })
             }
         }
@@ -284,12 +324,14 @@ private fun SetupPoint(title: String, description: String) {
 }
 
 @Composable
-private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onImportConversation: () -> Unit, onShareMessage: (String) -> Unit, onExportMarkdown: () -> Unit, onExportJson: () -> Unit) {
+private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: () -> Unit, onImportModel: () -> Unit, onImportDocument: () -> Unit, onImportConversation: () -> Unit, onShareMessage: (String) -> Unit, onSpeakMessage: (String) -> Unit, onStopSpeaking: () -> Unit, onExportMarkdown: () -> Unit, onExportJson: () -> Unit) {
     val conversation = state.conversations.firstOrNull { it.id == state.activeConversationId } ?: state.conversations.first()
     val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == ModelKind.TEXT && it.filePath != null && it.verified }
     val contextEstimate = conversation.messages.sumOf { estimateTokensForUi(it.text) }
     val clipboard = LocalClipboardManager.current
     var showSettings by remember { mutableStateOf(false) }
+    var showAssistantProfiles by remember { mutableStateOf(false) }
+    var showCreateAssistant by remember { mutableStateOf(false) }
     var showExportOptions by remember { mutableStateOf(false) }
     var renameConversationId by remember { mutableStateOf<String?>(null) }
     var showEditPrompt by remember { mutableStateOf(false) }
@@ -311,6 +353,9 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
             }
             }
             LocalStatus(isGenerating = state.isGenerating)
+            TextButton(onClick = { showAssistantProfiles = true }, enabled = !state.isGenerating) {
+                Text(state.assistantProfiles.firstOrNull { it.id == state.activeAssistantProfileId }?.name ?: "Assistant", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             IconButton(onClick = vm::toggleConversationList) {
                 Icon(Icons.Default.ChatBubbleOutline, contentDescription = if (state.showConversationList) "Hide conversations" else "Show conversations")
             }
@@ -366,9 +411,12 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
                 onEdit = { editPromptText = lastUserPrompt.orEmpty(); showEditPrompt = true },
                 onCopy = { text -> clipboard.setText(AnnotatedString(text)) },
                 onShare = onShareMessage,
+                onSpeak = onSpeakMessage,
+                                onStopSpeaking = onStopSpeaking,
             )
         }
-        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+        Row(verticalAlignment = Alignment.Bottom,
+ horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
             OutlinedTextField(
                 value = state.composerText,
                 onValueChange = vm::setComposerText,
@@ -384,6 +432,24 @@ private fun ChatScreen(state: DoraUiState, vm: MainViewModel, onBrowseModels: ()
                 }
             }
         }
+    }
+    if (showAssistantProfiles) {
+        AssistantProfilesDialog(
+            profiles = state.assistantProfiles,
+            activeProfileId = state.activeAssistantProfileId,
+            onDismiss = { showAssistantProfiles = false },
+            onActivate = { vm.activateAssistantProfile(it); showAssistantProfiles = false },
+            onDelete = vm::deleteAssistantProfile,
+            onCreate = { showAssistantProfiles = false; showCreateAssistant = true },
+        )
+    }
+    if (showCreateAssistant) {
+        AssistantProfileEditorDialog(
+            models = state.models.filter { it.kind == ModelKind.TEXT && it.verified && !it.filePath.isNullOrBlank() },
+            settings = state.activeChatSettingsForUi(),
+            onDismiss = { showCreateAssistant = false },
+            onSave = { profile -> vm.saveAssistantProfile(profile); showCreateAssistant = false },
+        )
     }
     if (showExportOptions) {
         ExportFormatDialog(
@@ -534,6 +600,78 @@ private fun ConversationListPanel(
 private fun DoraUiState.activeChatSettingsForUi() = conversationSettings[activeConversationId] ?: app.dora.localai.domain.GenerationSettings()
 
 @Composable
+private fun AssistantProfilesDialog(
+    profiles: List<AssistantProfile>,
+    activeProfileId: String?,
+    onDismiss: () -> Unit,
+    onActivate: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onCreate: () -> Unit,
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Local assistants") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Create private personas with their own system prompt and model binding. Nothing is uploaded.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (profiles.isEmpty()) Text("No saved assistants yet.", style = MaterialTheme.typography.bodyMedium)
+                profiles.forEach { profile ->
+                    Card(colors = CardDefaults.cardColors(containerColor = if (profile.id == activeProfileId) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(profile.name, style = MaterialTheme.typography.titleSmall)
+                            if (profile.description.isNotBlank()) Text(profile.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TextButton(onClick = { onActivate(profile.id) }) { Text(if (profile.id == activeProfileId) "Active" else "Use") }
+                                TextButton(onClick = { onDelete(profile.id) }) { Text("Delete") }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onCreate) { Text("New assistant") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
+}
+
+@Composable
+private fun AssistantProfileEditorDialog(
+    models: List<LocalModel>,
+    settings: GenerationSettings,
+    onDismiss: () -> Unit,
+    onSave: (AssistantProfile) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var systemPrompt by remember { mutableStateOf("") }
+    var greeting by remember { mutableStateOf("") }
+    var modelId by remember { mutableStateOf<String?>(models.firstOrNull()?.id) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New local assistant") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("Name") })
+                OutlinedTextField(value = description, onValueChange = { description = it }, singleLine = true, label = { Text("Description") })
+                OutlinedTextField(value = systemPrompt, onValueChange = { systemPrompt = it }, minLines = 3, maxLines = 5, label = { Text("System prompt") })
+                OutlinedTextField(value = greeting, onValueChange = { greeting = it }, minLines = 2, maxLines = 3, label = { Text("Starter greeting (optional)") })
+                Text("Model binding", style = MaterialTheme.typography.labelMedium)
+                Row(modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    models.forEach { model ->
+                        FilterChip(selected = model.id == modelId, onClick = { modelId = model.id }, label = { Text(model.name, maxLines = 1) })
+                    }
+                }
+                Text("The profile uses the current generation settings. You can fine-tune them later in Generation settings.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(AssistantProfile(name = name, description = description, systemPrompt = systemPrompt, modelId = modelId, greeting = greeting, settings = settings)) }, enabled = name.trim().isNotEmpty() && systemPrompt.trim().isNotEmpty()) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
 private fun ExportFormatDialog(onDismiss: () -> Unit, onMarkdown: () -> Unit, onJson: () -> Unit) {
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
@@ -650,6 +788,8 @@ private fun ChatHistory(
     onEdit: () -> Unit = {},
     onCopy: (String) -> Unit = {},
     onShare: (String) -> Unit = {},
+    onSpeak: (String) -> Unit = {},
+    onStopSpeaking: () -> Unit = {},
 ) {
     if (messages.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
@@ -671,13 +811,15 @@ private fun ChatHistory(
                 onEdit = onEdit,
                 onCopy = { onCopy(message.text) },
                 onShare = { onShare(message.text) },
+                onSpeak = { onSpeak(message.text) },
+                onStopSpeaking = onStopSpeaking,
             )
         }
     }
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, showActions: Boolean = false, canEdit: Boolean = false, onRegenerate: () -> Unit = {}, onEdit: () -> Unit = {}, onCopy: () -> Unit = {}, onShare: () -> Unit = {}) {
+private fun MessageBubble(message: ChatMessage, showActions: Boolean = false, canEdit: Boolean = false, onRegenerate: () -> Unit = {}, onEdit: () -> Unit = {}, onCopy: () -> Unit = {}, onShare: () -> Unit = {}, onSpeak: () -> Unit = {}, onStopSpeaking: () -> Unit = {}) {
     val isUser = message.role == MessageRole.USER
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Column(modifier = Modifier.fillMaxWidth(if (isUser) 0.84f else 0.94f)) {
@@ -700,6 +842,10 @@ private fun MessageBubble(message: ChatMessage, showActions: Boolean = false, ca
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick = onCopy) { Text("Copy") }
                         TextButton(onClick = onShare) { Text("Share") }
+                        if (!isUser) {
+                            TextButton(onClick = onSpeak) { Text("Read aloud") }
+                            TextButton(onClick = onStopSpeaking) { Text("Stop speech") }
+                        }
                         if (showActions) TextButton(onClick = onRegenerate) { Text("Regenerate") }
                         if (showActions && canEdit) TextButton(onClick = onEdit) { Text("Edit prompt") }
                     }
@@ -778,7 +924,7 @@ private fun InlineMarkdownText(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit) {
+private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> Unit, onImportFolder: () -> Unit) {
     val models = state.models.filter { model ->
         model.kind == ModelKind.TEXT && (state.localModelQuery.isBlank() || listOf(model.name, model.publisher, model.format, model.description).any { it.contains(state.localModelQuery, ignoreCase = true) })
     }
@@ -828,6 +974,12 @@ private fun ModelsScreen(state: DoraUiState, vm: MainViewModel, onImport: () -> 
             Icon(Icons.Default.Download, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text("Import a local GGUF")
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onImportFolder, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp)) {
+            Icon(Icons.Default.Folder, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Import a GGUF folder")
         }
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()),
@@ -1242,6 +1394,10 @@ private fun SettingsScreen(state: DoraUiState, vm: MainViewModel, onRequestNotif
         HorizontalDivider()
         SettingRow(Icons.Default.Lock, "Incognito mode", "New chat turns stay in memory and are not written to Room. Existing history is not deleted.") {
             Switch(checked = state.privacyIncognito, onCheckedChange = { vm.toggleIncognito() })
+        }
+        HorizontalDivider()
+        SettingRow(Icons.Default.Tune, "Bounded local tools", "Opt in to /calc, /count, /now, and /help. These commands run offline, do not execute code, and never access the network.") {
+            Switch(checked = state.localToolsEnabled, onCheckedChange = { vm.toggleLocalTools() })
         }
         HorizontalDivider()
         Column(modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -128,3 +128,10 @@ The candidate also hardens bounded conversation import for minSdk 26, adds destr
 ## v0.13.0-prealpha candidate — 2026-08-21
 
 The next candidate adds durable pinned conversations backed by a Room v7 migration, pinned-first history ordering, local model filtering, and updated CI schema enforcement. Pin state is restored from Room, preserved during conversation upserts, disabled in incognito mode, and exposed with accessible pin/unpin labels. The feature was verified with Kotlin compilation, unit tests, full debug/release assembly, lint, and ARM64 native linking.
+
+
+## v0.14.0-prealpha candidate — PocketPal parity slice
+
+This candidate adds a bounded Storage Access Framework folder importer for validated GGUF files, first-class local Assistant Profiles with model binding and optional starter greetings, Android device TextToSpeech playback controls for completed assistant messages, and opt-in deterministic local tools (`/calc`, `/count`, `/now`, `/help`). The local tools intentionally do not execute code or access the network. Assistant profiles and tool preferences are stored locally; no account, marketplace, or cloud service is required.
+
+The candidate also includes the PocketPal parity report with primary-source references and an explicit decision to keep neural TTS, arbitrary agent tools, PalsHub, external endpoints, GPU/NPU controls, and image generation gated until real Android-compatible adapters and physical-device evidence exist.

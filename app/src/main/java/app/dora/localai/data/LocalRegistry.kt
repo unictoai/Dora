@@ -1,6 +1,7 @@
 package app.dora.localai.data
 
 import android.content.Context
+import app.dora.localai.domain.AssistantProfile
 import app.dora.localai.domain.GenerationSettings
 
 class LocalRegistry(context: Context) {
@@ -26,6 +27,12 @@ class LocalRegistry(context: Context) {
     }
 
     fun isIncognito(): Boolean = prefs.getBoolean(KEY_INCOGNITO, false)
+
+    fun areLocalToolsEnabled(): Boolean = prefs.getBoolean(KEY_LOCAL_TOOLS, false)
+
+    fun setLocalToolsEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_LOCAL_TOOLS, value).apply()
+    }
 
     fun setIncognito(value: Boolean) {
         prefs.edit().putBoolean(KEY_INCOGNITO, value).apply()
@@ -71,6 +78,64 @@ class LocalRegistry(context: Context) {
             }.getOrNull()
         }
         .toMap()
+
+    fun saveAssistantProfile(profile: AssistantProfile) {
+        val normalized = profile.normalized()
+        val json = org.json.JSONObject()
+            .put("id", normalized.id)
+            .put("name", normalized.name)
+            .put("description", normalized.description)
+            .put("systemPrompt", normalized.systemPrompt)
+            .put("modelId", normalized.modelId)
+            .put("greeting", normalized.greeting)
+            .put("settings", org.json.JSONObject()
+                .put("maxTokens", normalized.settings.maxTokens)
+                .put("threads", normalized.settings.threads)
+                .put("temperature", normalized.settings.temperature.toDouble())
+                .put("topK", normalized.settings.topK)
+                .put("topP", normalized.settings.topP.toDouble()))
+            .toString()
+        prefs.edit().putString(assistantProfileKey(normalized.id), json).apply()
+    }
+
+    fun assistantProfiles(): List<AssistantProfile> = prefs.all
+        .filterKeys { it.startsWith(ASSISTANT_PROFILE_PREFIX) }
+        .mapNotNull { (key, value) ->
+            val encoded = value as? String ?: return@mapNotNull null
+            runCatching {
+                val json = org.json.JSONObject(encoded)
+                val settingsJson = json.optJSONObject("settings") ?: org.json.JSONObject()
+                AssistantProfile(
+                    id = json.optString("id", key.removePrefix(ASSISTANT_PROFILE_PREFIX)).take(80),
+                    name = json.optString("name", "Local assistant").take(60),
+                    description = json.optString("description").take(160),
+                    systemPrompt = json.optString("systemPrompt").take(4_000),
+                    modelId = json.optString("modelId").takeIf { it.isNotBlank() }?.take(120),
+                    greeting = json.optString("greeting").take(500),
+                    settings = GenerationSettings(
+                        maxTokens = settingsJson.optInt("maxTokens", 256),
+                        threads = settingsJson.optInt("threads", 4),
+                        temperature = settingsJson.optDouble("temperature", 0.7).toFloat(),
+                        topK = settingsJson.optInt("topK", 40),
+                        topP = settingsJson.optDouble("topP", 0.95).toFloat(),
+                    ).normalized(),
+                ).normalized()
+            }.getOrNull()
+        }
+        .sortedBy { it.name.lowercase() }
+
+    fun deleteAssistantProfile(id: String) {
+        prefs.edit().remove(assistantProfileKey(id)).apply()
+        if (activeAssistantProfileId() == id) setActiveAssistantProfileId(null)
+    }
+
+    fun activeAssistantProfileId(): String? = prefs.getString(KEY_ACTIVE_ASSISTANT_PROFILE, null)
+
+    fun setActiveAssistantProfileId(id: String?) {
+        prefs.edit().apply {
+            if (id.isNullOrBlank()) remove(KEY_ACTIVE_ASSISTANT_PROFILE) else putString(KEY_ACTIVE_ASSISTANT_PROFILE, id)
+        }.apply()
+    }
 
     fun setRetentionDays(value: Int) {
         prefs.edit().putInt(KEY_RETENTION_DAYS, value.coerceIn(0, 365)).apply()
@@ -144,6 +209,7 @@ class LocalRegistry(context: Context) {
     private fun artifactKey(id: String, field: String) = "artifact_${id}_$field"
     private fun profilePrefix(modelId: String) = "profile_${modelId}_"
     private fun profileKey(modelId: String, name: String) = profilePrefix(modelId) + name
+    private fun assistantProfileKey(id: String) = ASSISTANT_PROFILE_PREFIX + id
 
     private companion object {
         const val KEY_OFFLINE_ONLY = "offline_only"
@@ -151,7 +217,10 @@ class LocalRegistry(context: Context) {
         const val KEY_ACTIVE_MODEL = "active_model"
         const val KEY_INVALID_ARTIFACTS = "invalid_artifacts"
         const val KEY_INCOGNITO = "incognito"
+        const val KEY_LOCAL_TOOLS = "local_tools"
         const val KEY_RETENTION_DAYS = "retention_days"
         const val KEY_THEME_MODE = "theme_mode"
+        const val KEY_ACTIVE_ASSISTANT_PROFILE = "active_assistant_profile"
+        const val ASSISTANT_PROFILE_PREFIX = "assistant_profile_"
     }
 }

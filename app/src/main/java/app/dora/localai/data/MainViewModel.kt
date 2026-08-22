@@ -13,6 +13,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.dora.localai.DoraApplication
 import app.dora.localai.domain.CatalogFilter
+import app.dora.localai.domain.AssistantProfile
 import app.dora.localai.domain.ChatMessage
 import app.dora.localai.domain.CuratedModelSuggestion
 import app.dora.localai.domain.defaultCuratedModelSuggestions
@@ -29,6 +30,7 @@ import app.dora.localai.domain.JobKind
 import app.dora.localai.domain.JobState
 import app.dora.localai.domain.LocalDocument
 import app.dora.localai.domain.LocalModel
+import app.dora.localai.domain.LocalToolEngine
 import app.dora.localai.domain.MessageRole
 import app.dora.localai.engine.DoraDemoImageEngine
 import app.dora.localai.engine.DoraDemoTextEngine
@@ -114,9 +116,12 @@ data class DoraUiState(
     val documentSearchEnabled: Boolean = true,
     val showDocumentPanel: Boolean = false,
     val privacyIncognito: Boolean = false,
+    val localToolsEnabled: Boolean = false,
     val retentionDays: Int = 0,
     val conversationSettings: Map<String, GenerationSettings> = emptyMap(),
     val savedProfiles: Map<String, Map<String, GenerationSettings>> = emptyMap(),
+    val assistantProfiles: List<AssistantProfile> = emptyList(),
+    val activeAssistantProfileId: String? = null,
     val storageSummary: DoraStorageSummary = DoraStorageSummary(),
 )
 
@@ -193,11 +198,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isOfflineOnly = registry.isOfflineOnly(),
             themeMode = registry.themeMode(),
             privacyIncognito = registry.isIncognito(),
+            localToolsEnabled = registry.areLocalToolsEnabled(),
             retentionDays = registry.retentionDays(),
             runtimeNotice = if (NativeLlamaEngine.isAvailable()) "Native llama.cpp bridge loaded — import a GGUF model to enable real inference" else "Native llama.cpp bridge unavailable in this build",
             nativeRuntimeVersion = runCatching { NativeLlamaEngine.version() }.getOrElse { "Unavailable" },
             deviceSummary = "${deviceProfile.primaryAbi} • ${formatBytes(deviceProfile.totalRamBytes)} RAM • ${formatBytes(deviceProfile.availableStorageBytes)} free",
             savedProfiles = allModels.associate { it.id to registry.generationProfiles(it.id) },
+            assistantProfiles = registry.assistantProfiles(),
+            activeAssistantProfileId = registry.activeAssistantProfileId(),
             storageSummary = storageSummary(),
         )
     }
@@ -483,6 +491,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 toastMessage = "Conversation deleted from this device",
             )
         }
+    }
+
+    fun saveAssistantProfile(profile: AssistantProfile) {
+        val normalized = profile.normalized()
+        registry.saveAssistantProfile(normalized)
+        registry.setActiveAssistantProfileId(normalized.id)
+        _uiState.update { state ->
+            state.copy(
+                assistantProfiles = (state.assistantProfiles.filterNot { it.id == normalized.id } + normalized).sortedBy { it.name.lowercase() },
+                activeAssistantProfileId = normalized.id,
+                toastMessage = "Saved assistant: ${normalized.name}",
+            )
+        }
+    }
+
+    fun deleteAssistantProfile(id: String) {
+        registry.deleteAssistantProfile(id)
+        _uiState.update { state ->
+            state.copy(
+                assistantProfiles = state.assistantProfiles.filterNot { it.id == id },
+                activeAssistantProfileId = if (state.activeAssistantProfileId == id) null else state.activeAssistantProfileId,
+                toastMessage = "Assistant removed",
+            )
+        }
+    }
+
+    fun activateAssistantProfile(id: String) {
+        val profile = _uiState.value.assistantProfiles.firstOrNull { it.id == id } ?: return
+        val model = profile.modelId?.let { modelId ->
+            _uiState.value.models.firstOrNull { it.id == modelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.verified && !it.filePath.isNullOrBlank() }
+        }
+        val conversationId = _uiState.value.activeConversationId
+        val activeModelId = model?.id ?: _uiState.value.activeModelId
+        registry.setActiveAssistantProfileId(profile.id)
+        if (model != null) registry.setActiveModelId(model.id)
+        val settings = profile.settings.copy(systemPrompt = profile.systemPrompt).normalized()
+        val currentConversation = _uiState.value.conversations.firstOrNull { it.id == conversationId }
+        val greetingMessage = profile.greeting.takeIf { it.isNotBlank() && currentConversation?.messages.isNullOrEmpty() }?.let { ChatMessage(role = MessageRole.ASSISTANT, text = it) }
+        val updatedConversation = greetingMessage?.let { message -> currentConversation?.copy(messages = currentConversation.messages + message) }
+        _uiState.update { state ->
+            state.copy(
+                activeAssistantProfileId = profile.id,
+                activeModelId = activeModelId,
+                conversationSettings = state.conversationSettings + (conversationId to settings),
+                conversations = updatedConversation?.let { updated -> state.conversations.map { conversation -> if (conversation.id == conversationId) updated else conversation } } ?: state.conversations,
+                toastMessage = if (model != null) "Assistant active: ${profile.name} • ${model.name}" else "Assistant active: ${profile.name}",
+            )
+        }
+        updatedConversation?.let { conversation ->
+            greetingMessage?.let { persistMessage(conversationId, it, conversation.messages.lastIndex.toLong()) }
+            persistConversation(conversation, settings)
+        } ?: currentConversation?.let { persistConversation(it, settings) }
     }
 
     fun saveActiveModelProfile(name: String, settings: GenerationSettings) {
@@ -868,6 +928,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(isOfflineOnly = value) }
     }
 
+    fun toggleLocalTools() {
+        val value = !_uiState.value.localToolsEnabled
+        registry.setLocalToolsEnabled(value)
+        _uiState.update { it.copy(localToolsEnabled = value, toastMessage = if (value) "Bounded local tools enabled" else "Local tools disabled") }
+    }
+
     fun toggleIncognito() {
         val value = !_uiState.value.privacyIncognito
         registry.setIncognito(value)
@@ -1030,37 +1096,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(toastMessage = result.exceptionOrNull()?.message ?: "GGUF import failed") }
                 return@launch
             }
-            val nativeValid = withContext(Dispatchers.Default) {
-                NativeLlamaEngine.isAvailable() && NativeLlamaEngine.validateModel(artifact.path)
-            }
-            if (!nativeValid) {
-                modelStore.delete(artifact.path)
+            val importedModel = registerImportedArtifact(artifact)
+            if (importedModel == null) {
                 _uiState.update { it.copy(toastMessage = "Dora could not load this GGUF on this ARM64 device") }
                 return@launch
             }
-            registry.setArtifact(LocalRegistry.StoredArtifact(artifact.id, artifact.name, artifact.path, artifact.sizeBytes, artifact.sha256))
-            registry.setActiveModelId(artifact.id)
-            val importedModel = LocalModel(
-                id = artifact.id,
-                name = artifact.metadata.displayName?.takeIf { it.isNotBlank() } ?: artifact.name,
-                publisher = "Local import",
-                kind = app.dora.localai.domain.ModelKind.TEXT,
-                format = "${artifact.metadata.quantization ?: "GGUF"} GGUF",
-                sizeLabel = formatBytes(artifact.sizeBytes),
-                memoryLabel = "Imported local model",
-                license = "User-provided file",
-                description = "Imported and validated from private storage.",
-                installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
-                verified = true,
-                recommended = false,
-                filePath = artifact.path,
-                metadata = artifact.metadata,
-            )
-            persistModelRecord(importedModel, LocalRegistry.StoredArtifact(artifact.id, importedModel.name, artifact.path, artifact.sizeBytes, artifact.sha256))
+            registry.setActiveModelId(importedModel.id)
             _uiState.update { state ->
-                state.copy(models = state.models.filterNot { it.id == artifact.id } + importedModel, activeModelId = artifact.id, toastMessage = "Model ready: ${importedModel.name}")
+                state.copy(models = state.models.filterNot { it.id == importedModel.id } + importedModel, activeModelId = importedModel.id, toastMessage = "Model ready: ${importedModel.name}")
             }
         }
+    }
+
+    fun importGgufFolder(treeUri: Uri) {
+        if (_uiState.value.isGenerating || _uiState.value.isBenchmarking) {
+            _uiState.update { it.copy(toastMessage = "Stop local work before importing models") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(toastMessage = "Scanning selected folder for GGUF files…") }
+            val result = withContext(Dispatchers.IO) { modelStore.importGgufFolder(treeUri) }
+            val summary = result.getOrNull()
+            if (summary == null) {
+                _uiState.update { it.copy(toastMessage = result.exceptionOrNull()?.message ?: "Folder import failed") }
+                return@launch
+            }
+            val importedModels = summary.imported.mapNotNull { registerImportedArtifact(it) }
+            if (importedModels.isEmpty()) {
+                _uiState.update { it.copy(toastMessage = "No compatible GGUF files could be loaded on this ARM64 device") }
+                return@launch
+            }
+            val activeId = importedModels.first().id
+            registry.setActiveModelId(activeId)
+            val importedIds = importedModels.map { it.id }.toSet()
+            val skipped = summary.skipped + (summary.imported.size - importedModels.size)
+            val detail = if (skipped == 0) "Imported ${importedModels.size} GGUF models" else "Imported ${importedModels.size}; skipped $skipped incompatible or invalid files"
+            _uiState.update { state ->
+                state.copy(
+                    models = state.models.filterNot { it.id in importedIds } + importedModels,
+                    activeModelId = activeId,
+                    toastMessage = detail,
+                )
+            }
+        }
+    }
+
+    private suspend fun registerImportedArtifact(artifact: LocalModelStore.ImportedArtifact): LocalModel? {
+        val nativeValid = withContext(Dispatchers.Default) {
+            NativeLlamaEngine.isAvailable() && NativeLlamaEngine.validateModel(artifact.path)
+        }
+        if (!nativeValid) {
+            modelStore.delete(artifact.path)
+            return null
+        }
+        val importedModel = LocalModel(
+            id = artifact.id,
+            name = artifact.metadata.displayName?.takeIf { it.isNotBlank() } ?: artifact.name,
+            publisher = "Local import",
+            kind = app.dora.localai.domain.ModelKind.TEXT,
+            format = "${artifact.metadata.quantization ?: "GGUF"} GGUF",
+            sizeLabel = formatBytes(artifact.sizeBytes),
+            memoryLabel = "Imported local model",
+            license = "User-provided file",
+            description = "Imported and validated from private storage.",
+            installState = app.dora.localai.domain.ModelInstallState.INSTALLED,
+            verified = true,
+            recommended = false,
+            filePath = artifact.path,
+            metadata = artifact.metadata,
+        )
+        val stored = LocalRegistry.StoredArtifact(artifact.id, importedModel.name, artifact.path, artifact.sizeBytes, artifact.sha256)
+        registry.setArtifact(stored)
+        persistModelRecord(importedModel, stored)
+        return importedModel
     }
 
     fun installModel(modelId: String) {
@@ -1098,6 +1206,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _uiState.value
         val conversationId = state.activeConversationId
         val currentConversation = state.conversations.firstOrNull { it.id == conversationId } ?: return
+        if (state.localToolsEnabled) {
+            LocalToolEngine.execute(prompt)?.let { output ->
+                val userMessage = ChatMessage(role = MessageRole.USER, text = prompt)
+                val assistantMessage = ChatMessage(role = MessageRole.ASSISTANT, text = output)
+                val updatedConversation = currentConversation.copy(messages = currentConversation.messages + userMessage + assistantMessage)
+                _uiState.update { current ->
+                    current.copy(
+                        conversations = current.conversations.map { conversation -> if (conversation.id == conversationId) updatedConversation else conversation },
+                        composerText = "",
+                        toastMessage = "Ran bounded local tool offline",
+                    )
+                }
+                persistMessage(conversationId, userMessage, updatedConversation.messages.lastIndex - 1L)
+                persistMessage(conversationId, assistantMessage, updatedConversation.messages.lastIndex.toLong())
+                persistConversation(updatedConversation, state.conversationSettings[conversationId] ?: GenerationSettings())
+                return
+            }
+        }
         val activeModel = state.models.firstOrNull { it.id == state.activeModelId && it.kind == app.dora.localai.domain.ModelKind.TEXT && it.filePath != null && it.verified }
         if (activeModel == null) {
             _uiState.update { it.copy(toastMessage = "Select a verified local GGUF model before chatting") }

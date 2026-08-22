@@ -67,3 +67,10 @@ Additional verified work includes copy/share actions for completed messages, nam
 ## v0.13 candidate evidence — 2026-08-21
 
 Dora now supports durable pinned conversations through a Room v7 migration and pinned-first ordering, plus an installed-model filter independent of Hugging Face discovery. The v7 schema fixture is generated and CI now enforces it. Pinning is unavailable in incognito mode by design, and the local model filter reports an explicit empty state rather than hiding the absence of matches.
+
+
+## v0.14 PocketPal-parity evidence — 2026-08-22
+
+Dora adds a real Android Storage Access Framework folder importer with bounded recursive scanning, aggregate limits, private-copy storage, GGUF validation, and per-file skip reporting. It also adds first-class locally persisted Assistant Profiles with model binding, prompt and settings application, optional starter greetings, and a local profile picker. Completed assistant messages can be read aloud through the device’s Android TextToSpeech engine, with explicit device-engine wording. Finally, an opt-in deterministic local-tool engine provides `/calc`, `/count`, `/now`, and `/help` without arbitrary code execution or network access.
+
+PocketPal parity research is stored in `DORA_POCKETPAL_PARITY_2026.md`. Neural TTS engines, arbitrary agent tools, PalsHub, external endpoints, GPU/NPU controls, and image generation remain gated because a button or general upstream runtime is not sufficient evidence of a production Dora feature.
